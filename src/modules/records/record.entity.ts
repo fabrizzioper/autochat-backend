@@ -17,94 +17,94 @@ export class RecordEntity {
   @Column({ unique: true })
   cui: number;
 
-  @Column({ type: 'text' })
+  @Column({ type: 'text', nullable: true })
   nombreProyecto: string;
 
-  @Column()
+  @Column({ nullable: true })
   sector: string;
 
-  @Column()
+  @Column({ nullable: true })
   entidad: string;
 
-  @Column()
+  @Column({ nullable: true })
   departamento: string;
 
-  @Column()
+  @Column({ nullable: true })
   provincia: string;
 
-  @Column()
+  @Column({ nullable: true })
   distrito: string;
 
-  @Column()
+  @Column({ nullable: true })
   estadoProyecto: string;
 
-  @Column()
+  @Column({ nullable: true })
   tipoProyecto: string;
 
-  @Column()
+  @Column({ nullable: true })
   tieneExpediente: string;
 
-  @Column()
+  @Column({ nullable: true })
   tieneContrato: string;
 
-  @Column()
+  @Column({ nullable: true })
   tieneProceso: string;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   pmi2026: number;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   costoTotal: number;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   devengado2024: number;
 
-  @Column()
+  @Column({ nullable: true })
   porcentajeDevengado2024: number;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   pim2025: number;
 
-  @Column()
+  @Column({ nullable: true })
   certificadoPorcentaje: number;
 
-  @Column()
+  @Column({ nullable: true })
   comprometidoPorcentaje: number;
 
-  @Column()
+  @Column({ nullable: true })
   devengadoPorcentaje: number;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   pendienteFinanciar: number;
 
-  @Column()
+  @Column({ nullable: true })
   enAnexoLey32185: string;
 
-  @Column({ type: 'bigint' })
+  @Column({ type: 'bigint', nullable: true })
   montoLey32513: number;
 
-  @Column()
+  @Column({ nullable: true })
   entidadProgramadora: string;
 
-  @Column()
+  @Column({ nullable: true })
   porcentajeFinanciadoTotal: number;
 
-  @Column()
+  @Column({ nullable: true })
   continuidadInversiones: string;
 
-  @Column()
+  @Column({ nullable: true })
   enCsLey32416: string;
 
-  @Column()
+  @Column({ nullable: true })
   incorporaciones2024: string;
 
-  @Column()
+  @Column({ nullable: true })
   incorporaciones2025: string;
 
-  @Column()
+  @Column({ nullable: true })
   demandasAdicionales: string;
 
-  @Column()
+  @Column({ nullable: true })
   fechaActualizacion: string;
 
   @CreateDateColumn()

@@ -1,3 +1,9 @@
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Cargar variables de entorno ANTES que cualquier otra cosa
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { env } from './config/env';

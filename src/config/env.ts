@@ -1,8 +1,6 @@
-import * as dotenv from 'dotenv';
 import { envSchema, Env } from './env.schema';
 
-dotenv.config();
-
+// Las variables de entorno ya se cargan en main.ts
 envSchema.parse(process.env);
 
 export const env: Env = {
