@@ -1,4 +1,4 @@
-import { Controller, Get, Post } from '@nestjs/common';
+import { Controller, Get, Post, HttpCode, HttpStatus } from '@nestjs/common';
 import { WhatsAppService } from './whatsapp.service';
 import type { QRCodeData, SessionData, ConnectionInfo } from './types/whatsapp.types';
 
@@ -22,6 +22,7 @@ export class WhatsAppController {
   }
 
   @Post('disconnect')
+  @HttpCode(HttpStatus.OK)
   async disconnect(): Promise<{ message: string }> {
     await this.whatsappService.disconnect();
     return { message: 'Desconectado exitosamente' };

@@ -1,22 +1,19 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { WhatsAppController } from './whatsapp.controller';
 import { WhatsAppService } from './whatsapp.service';
 import { WhatsAppGateway } from './whatsapp.gateway';
+import { ConfigModule } from '../config/config.module';
+import { ExcelModule } from '../excel/excel.module';
+import { RecordsModule } from '../records/records.module';
 
 @Module({
-  controllers: [WhatsAppController],
-  providers: [
-    WhatsAppService,
-    WhatsAppGateway,
-    {
-      provide: 'GATEWAY_INIT',
-      useFactory: (service: WhatsAppService, gateway: WhatsAppGateway) => {
-        service.setGateway(gateway);
-        return true;
-      },
-      inject: [WhatsAppService, WhatsAppGateway],
-    },
+  imports: [
+    forwardRef(() => ConfigModule),
+    forwardRef(() => ExcelModule),
+    forwardRef(() => RecordsModule),
   ],
+  controllers: [WhatsAppController],
+  providers: [WhatsAppService, WhatsAppGateway],
   exports: [WhatsAppService, WhatsAppGateway],
 })
 export class WhatsAppModule {}
