@@ -6,10 +6,12 @@ import { ConfigModule } from './modules/config/config.module';
 import { ExcelModule } from './modules/excel/excel.module';
 import { RecordsModule } from './modules/records/records.module';
 import { DatabaseModule } from './database/database.module';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Module({
   imports: [
     DatabaseModule,
+    AuthModule,
     WhatsAppModule,
     ConfigModule,
     ExcelModule,

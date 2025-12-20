@@ -12,32 +12,44 @@ export class ConfigService {
     private readonly repo: Repository<ConfigEntity>,
   ) {}
 
-  async getAuthorizedNumber(): Promise<string | null> {
-    const config = await this.repo.findOne({ where: { key: AUTHORIZED_NUMBER_KEY } });
+  async getAuthorizedNumber(userId: number): Promise<string | null> {
+    const config = await this.repo.findOne({ 
+      where: { userId, key: AUTHORIZED_NUMBER_KEY },
+    });
     return config?.value || null;
   }
 
-  async setAuthorizedNumber(phoneNumber: string): Promise<void> {
-    const existing = await this.repo.findOne({ where: { key: AUTHORIZED_NUMBER_KEY } });
+  async setAuthorizedNumber(userId: number, phoneNumber: string): Promise<void> {
+    const existing = await this.repo.findOne({ 
+      where: { userId, key: AUTHORIZED_NUMBER_KEY },
+    });
     
     if (existing) {
       existing.value = phoneNumber;
       await this.repo.save(existing);
     } else {
       await this.repo.save({
+        userId,
         key: AUTHORIZED_NUMBER_KEY,
         value: phoneNumber,
       });
     }
   }
 
-  async removeAuthorizedNumber(): Promise<void> {
-    await this.repo.delete({ key: AUTHORIZED_NUMBER_KEY });
+  async removeAuthorizedNumber(userId: number): Promise<void> {
+    await this.repo.delete({ userId, key: AUTHORIZED_NUMBER_KEY });
   }
 
-  async isAuthorized(phoneNumber: string): Promise<boolean> {
-    const authorized = await this.getAuthorizedNumber();
+  async isAuthorized(userId: number, phoneNumber: string): Promise<boolean> {
+    const authorized = await this.getAuthorizedNumber(userId);
     return authorized === phoneNumber;
+  }
+
+  async getUserIdByPhoneNumber(phoneNumber: string): Promise<number | null> {
+    const config = await this.repo.findOne({ 
+      where: { key: AUTHORIZED_NUMBER_KEY, value: phoneNumber },
+    });
+    return config?.userId || null;
   }
 }
 

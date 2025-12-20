@@ -54,6 +54,7 @@ export class ExcelService {
     filePath: string,
     filename: string,
     uploadedBy: string,
+    userId: number,
   ): Promise<{ success: boolean; recordsCount: number; message: string }> {
     try {
       // Leer archivo Excel
@@ -72,6 +73,7 @@ export class ExcelService {
 
       // Crear metadata
       const metadata = this.metadataRepo.create({
+        userId,
         filename,
         totalRecords: data.length,
         uploadedBy,
@@ -81,6 +83,7 @@ export class ExcelService {
       // Guardar registros
       const records = data.map(row => 
         this.recordRepo.create({
+          userId,
           excelId: savedMetadata.id,
           cui: row.CUI,
           nombreProyecto: row.NOMBRE_PROYECTO,
@@ -135,17 +138,21 @@ export class ExcelService {
     }
   }
 
-  async getAllExcelMetadata(): Promise<ExcelMetadataEntity[]> {
-    return this.metadataRepo.find({ order: { uploadedAt: 'DESC' } });
+  async getAllExcelMetadata(userId: number): Promise<ExcelMetadataEntity[]> {
+    return this.metadataRepo.find({ 
+      where: { userId },
+      order: { uploadedAt: 'DESC' },
+    });
   }
 
   async getRecordsByExcelId(
+    userId: number,
     excelId: number,
     page: number = 1,
     limit: number = 20,
   ): Promise<{ data: RecordEntity[]; total: number; totalPages: number }> {
     const [data, total] = await this.recordRepo.findAndCount({
-      where: { excelId },
+      where: { userId, excelId },
       skip: (page - 1) * limit,
       take: limit,
       order: { cui: 'ASC' },
@@ -156,6 +163,21 @@ export class ExcelService {
       total,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  async deleteExcel(userId: number, excelId: number): Promise<void> {
+    // Verificar que el Excel pertenece al usuario
+    const excel = await this.metadataRepo.findOne({ 
+      where: { id: excelId, userId },
+    });
+
+    if (!excel) {
+      throw new Error('Excel no encontrado o no tienes permiso para eliminarlo');
+    }
+
+    // Eliminar registros asociados (se eliminan automáticamente por onDelete: 'CASCADE')
+    // Eliminar metadata
+    await this.metadataRepo.remove(excel);
   }
 }
 

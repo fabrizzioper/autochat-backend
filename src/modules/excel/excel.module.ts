@@ -1,12 +1,16 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { RecordEntity } from '../records/record.entity';
 import { ExcelService } from './excel.service';
 import { ExcelController } from './excel.controller';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([ExcelMetadataEntity, RecordEntity])],
+  imports: [
+    TypeOrmModule.forFeature([ExcelMetadataEntity, RecordEntity]),
+    forwardRef(() => AuthModule),
+  ],
   providers: [ExcelService],
   controllers: [ExcelController],
   exports: [ExcelService],

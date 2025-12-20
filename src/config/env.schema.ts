@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const envSchema = z.object({
   PORT: z.string().transform(Number),
   CORS_ORIGINS: z.string().transform(v => v.split(',')),
+  JWT_SECRET: z.string(),
   
   DB_HOST: z.string(),
   DB_PORT: z.string().transform(Number),

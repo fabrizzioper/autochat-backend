@@ -1,10 +1,18 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { ExcelMetadataEntity } from '../excel/excel-metadata.entity';
+import { UserEntity } from '../users/user.entity';
 
 @Entity('records')
 export class RecordEntity {
   @PrimaryGeneratedColumn()
   id: number;
+
+  @Column({ name: 'user_id' })
+  userId: number;
+
+  @ManyToOne(() => UserEntity, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'user_id' })
+  user: UserEntity;
 
   @Column({ name: 'excel_id' })
   excelId: number;

@@ -155,9 +155,9 @@ export class WhatsAppService {
 
         const senderNumber = msg.key.remoteJid?.split('@')[0] || '';
         
-        // Verificar si es número autorizado
-        const isAuthorized = await this.configService.isAuthorized(senderNumber);
-        if (!isAuthorized) {
+        // Verificar si es número autorizado y obtener userId
+        const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+        if (!userId) {
           this.logger.log(`Mensaje de número no autorizado: ${senderNumber}`);
           continue;
         }
@@ -194,8 +194,16 @@ export class WhatsAppService {
       await fs.mkdir(path.join(process.cwd(), 'temp'), { recursive: true });
       await fs.writeFile(tempPath, buffer);
 
+      // Obtener userId del número autorizado
+      const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+      if (!userId) {
+        await this.sendMessage(senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
+        await fs.unlink(tempPath);
+        return;
+      }
+
       // Procesar Excel
-      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber);
+      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, userId);
 
       // Eliminar archivo temporal
       await fs.unlink(tempPath);
@@ -221,7 +229,14 @@ export class WhatsAppService {
         const cui = parseInt(cuiMatch[1]);
         this.logger.log(`Buscando CUI: ${cui}`);
 
-        const record = await this.recordsService.findByCui(cui);
+        // Obtener userId del número autorizado
+        const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+        if (!userId) {
+          await this.sendMessage(senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
+          return;
+        }
+
+        const record = await this.recordsService.findByCui(userId, cui);
 
         if (record) {
           const response = this.recordsService.formatRecordResponse(record);

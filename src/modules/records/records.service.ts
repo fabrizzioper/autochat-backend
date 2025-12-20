@@ -10,8 +10,8 @@ export class RecordsService {
     private readonly repo: Repository<RecordEntity>,
   ) {}
 
-  async findByCui(cui: number): Promise<RecordEntity | null> {
-    return this.repo.findOne({ where: { cui } });
+  async findByCui(userId: number, cui: number): Promise<RecordEntity | null> {
+    return this.repo.findOne({ where: { userId, cui } });
   }
 
   formatRecordResponse(record: RecordEntity): string {
