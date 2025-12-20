@@ -211,6 +211,15 @@ export class WhatsAppService {
       // Responder
       await this.sendMessage(senderNumber, result.message);
 
+      // Notificar al frontend a través de WebSocket
+      if (this.gateway && result.success) {
+        this.gateway.server.emit('excel-uploaded', {
+          userId,
+          filename,
+          recordsCount: result.recordsCount,
+        });
+      }
+
       this.logger.log(`Excel procesado: ${result.recordsCount} registros`);
     } catch (error) {
       this.logger.error(`Error procesando Excel: ${error.message}`);
