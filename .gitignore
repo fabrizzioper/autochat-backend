@@ -157,3 +157,5 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # NestJS specific
 dist/
 *.js.map
+
+auth_info/
