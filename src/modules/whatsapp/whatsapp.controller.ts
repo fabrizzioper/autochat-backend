@@ -12,24 +12,27 @@ export class WhatsAppController {
 
   @Get('qr')
   async getQRCode(@GetUser() user: UserEntity): Promise<QRCodeData> {
-    return this.whatsappService.getQRCode();
+    // Usar el ID del usuario autenticado para obtener su QR específico
+    return this.whatsappService.getQRCode(user.id);
   }
 
   @Get('session')
   getSessionStatus(@GetUser() user: UserEntity): SessionData {
-    return this.whatsappService.getSessionStatus();
+    // Usar el ID del usuario autenticado para obtener su sesión específica
+    return this.whatsappService.getSessionStatus(user.id);
   }
 
   @Get('connection-info')
   getConnectionInfo(@GetUser() user: UserEntity): ConnectionInfo | null {
-    return this.whatsappService.getConnectionInfo();
+    // Usar el ID del usuario autenticado para obtener su información de conexión
+    return this.whatsappService.getConnectionInfo(user.id);
   }
 
   @Post('disconnect')
   @HttpCode(HttpStatus.OK)
   async disconnect(@GetUser() user: UserEntity): Promise<{ message: string }> {
-    await this.whatsappService.disconnect();
+    // Desconectar solo la sesión del usuario autenticado
+    await this.whatsappService.disconnect(user.id);
     return { message: 'Desconectado exitosamente' };
   }
 }
-

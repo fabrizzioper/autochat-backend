@@ -1,11 +1,13 @@
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import makeWASocket, {
   DisconnectReason,
-  useMultiFileAuthState,
   ConnectionState,
   WASocket,
   downloadMediaMessage,
+  WAMessage,
+  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
+import pino from 'pino';
 import QRCode from 'qrcode';
 import { Boom } from '@hapi/boom';
 import * as path from 'path';
@@ -15,15 +17,22 @@ import { WhatsAppGateway } from './whatsapp.gateway';
 import { ConfigService } from '../config/config.service';
 import { ExcelService } from '../excel/excel.service';
 import { RecordsService } from '../records/records.service';
+import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
+
+interface UserSession {
+  socket: WASocket | null;
+  qrCodeString: string | null;
+  connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+  phoneNumber: string | null;
+  connectionInfo: ConnectionInfo | null;
+}
 
 @Injectable()
 export class WhatsAppService {
   private readonly logger = new Logger(WhatsAppService.name);
-  private socket: WASocket | null = null;
-  private qrCodeString: string | null = null;
-  private connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
-  private phoneNumber: string | null = null;
-  private connectionInfo: ConnectionInfo | null = null;
+  
+  // Map para almacenar sesiones por userId
+  private userSessions: Map<number, UserSession> = new Map();
 
   constructor(
     @Inject(forwardRef(() => ConfigService))
@@ -34,81 +43,142 @@ export class WhatsAppService {
     private readonly recordsService: RecordsService,
     @Inject(forwardRef(() => WhatsAppGateway))
     private readonly gateway: WhatsAppGateway,
+    @Inject(forwardRef(() => WhatsAppCredentialsService))
+    private readonly credentialsService: WhatsAppCredentialsService,
   ) {
-    this.initializeSession();
+    // Ya no cargamos sesiones al arrancar - se cargan cuando el usuario se conecta
   }
 
-  private async initializeSession() {
-    try {
-      const authPath = path.join(process.cwd(), 'auth_info');
-      const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  private getUserSession(userId: number): UserSession {
+    if (!this.userSessions.has(userId)) {
+      this.userSessions.set(userId, {
+        socket: null,
+        qrCodeString: null,
+        connectionStatus: 'disconnected',
+        phoneNumber: null,
+        connectionInfo: null,
+      });
+    }
+    return this.userSessions.get(userId)!;
+  }
 
-      this.socket = makeWASocket({
+  /**
+   * Intenta cargar una sesión desde la base de datos si existe
+   */
+  async tryLoadSessionFromDisk(userId: number): Promise<boolean> {
+    const session = this.getUserSession(userId);
+    
+    // Si ya está conectado o conectando, no hacer nada
+    if (session.connectionStatus === 'connected' || session.connectionStatus === 'connecting') {
+      return session.connectionStatus === 'connected';
+    }
+
+    // Verificar si hay credenciales en la BD
+    const hasCredentials = await this.credentialsService.hasCredentials(userId);
+    
+    if (hasCredentials && !session.socket) {
+      this.logger.log(`Usuario ${userId} tiene credenciales en BD, intentando cargar sesión...`);
+      await this.initializeSession(userId);
+      
+      // Esperar un poco para que se conecte
+      const maxWait = 5000;
+      const startTime = Date.now();
+      
+      while (this.getUserSession(userId).connectionStatus === 'connecting' && (Date.now() - startTime) < maxWait) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      return this.getUserSession(userId).connectionStatus === 'connected';
+    }
+    
+    return false;
+  }
+
+  async initializeSession(userId: number) {
+    const session = this.getUserSession(userId);
+    
+    // Si ya hay un socket activo, no crear otro
+    if (session.socket) {
+      this.logger.log(`Ya existe un socket para usuario ${userId}`);
+      return;
+    }
+    
+    try {
+      // Usar el auth state de la base de datos
+      const { state, saveCreds } = await this.credentialsService.useDBAuthState(userId);
+
+      session.connectionStatus = 'connecting';
+
+      // Logger silencioso para evitar logs de base64
+      const silentLogger = pino({ level: 'silent' });
+      
+      session.socket = makeWASocket({
         auth: state,
         printQRInTerminal: false,
+        logger: silentLogger,
       });
 
       // Manejar actualización de credenciales
-      this.socket.ev.on('creds.update', saveCreds);
+      session.socket.ev.on('creds.update', saveCreds);
 
       // Manejar código QR
-      this.socket.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
+      session.socket.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          this.logger.log('QR Code generado');
-          this.qrCodeString = await QRCode.toDataURL(qr);
-          this.connectionStatus = 'connecting';
+          this.logger.log(`QR Code generado para usuario ${userId}`);
+          session.qrCodeString = await QRCode.toDataURL(qr);
+          session.connectionStatus = 'connecting';
           
-          // Emitir QR por WebSocket
+          // Emitir QR por WebSocket solo al usuario específico
           if (this.gateway) {
-            this.gateway.emitQRCode(this.qrCodeString);
+            this.gateway.emitQRCodeToUser(userId, session.qrCodeString);
           }
         }
 
         if (connection === 'close') {
           const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-          this.logger.log(`Conexión cerrada. Reconectando: ${shouldReconnect}`);
+          this.logger.log(`Conexión cerrada para usuario ${userId}. Reconectando: ${shouldReconnect}`);
+          
+          // Limpiar el socket actual
+          session.socket = null;
+          session.qrCodeString = null;
+          session.phoneNumber = null;
+          session.connectionInfo = null;
           
           if (shouldReconnect) {
-            this.connectionStatus = 'disconnected';
-            this.qrCodeString = null;
-            this.phoneNumber = null;
-            this.connectionInfo = null;
+            session.connectionStatus = 'disconnected';
             
             // Emitir estado desconectado por WebSocket
             if (this.gateway) {
-              this.gateway.emitConnectionStatus('disconnected');
+              this.gateway.emitConnectionStatusToUser(userId, 'disconnected');
             }
             
             // Esperar un poco antes de reintentar
             setTimeout(() => {
-              this.initializeSession();
-            }, 1000);
+              this.initializeSession(userId);
+            }, 2000);
           } else {
-            this.connectionStatus = 'disconnected';
-            this.qrCodeString = null;
-            this.phoneNumber = null;
-            this.connectionInfo = null;
+            session.connectionStatus = 'disconnected';
             
             // Emitir estado desconectado por WebSocket
             if (this.gateway) {
-              this.gateway.emitConnectionStatus('disconnected');
+              this.gateway.emitConnectionStatusToUser(userId, 'disconnected');
             }
           }
         } else if (connection === 'open') {
-          this.logger.log('Conexión abierta exitosamente');
-          this.connectionStatus = 'connected';
-          this.qrCodeString = null;
+          this.logger.log(`Conexión abierta exitosamente para usuario ${userId}`);
+          session.connectionStatus = 'connected';
+          session.qrCodeString = null;
           
           // Obtener número de teléfono y datos de conexión
-          if (this.socket && this.socket.user?.id) {
-            this.phoneNumber = this.socket.user.id.split(':')[0];
+          if (session.socket && session.socket.user?.id) {
+            session.phoneNumber = session.socket.user.id.split(':')[0];
             
             // Capturar información de conexión solo si tenemos el número
-            if (this.phoneNumber) {
-              this.connectionInfo = {
-                phoneNumber: this.phoneNumber,
+            if (session.phoneNumber) {
+              session.connectionInfo = {
+                phoneNumber: session.phoneNumber,
                 platform: 'WEB',
                 device: 'Desktop',
                 browser: ['Mac OS', 'Chrome', '14.4.1'],
@@ -121,70 +191,76 @@ export class WhatsAppService {
                 },
               };
               
-              this.logger.log(`Información de conexión capturada: ${JSON.stringify(this.connectionInfo)}`);
+              this.logger.log(`Información de conexión capturada para usuario ${userId}: ${JSON.stringify(session.connectionInfo)}`);
             }
           }
           
           // Emitir estado conectado por WebSocket
           if (this.gateway) {
-            this.gateway.emitConnectionStatus('connected', this.phoneNumber || undefined);
+            this.gateway.emitConnectionStatusToUser(userId, 'connected', session.phoneNumber || undefined);
             
             // Emitir información de conexión completa
-            if (this.connectionInfo) {
-              this.gateway.server.emit('connection-info', this.connectionInfo);
-              this.logger.log('Información de conexión emitida');
+            if (session.connectionInfo) {
+              this.gateway.emitConnectionInfoToUser(userId, session.connectionInfo);
+              this.logger.log(`Información de conexión emitida para usuario ${userId}`);
             }
           }
 
           // Registrar listener de mensajes
-          this.setupMessageListener();
+          this.setupMessageListener(userId);
         }
       });
     } catch (error) {
-      this.logger.error('Error inicializando sesión de WhatsApp', error);
-      this.connectionStatus = 'error';
+      this.logger.error(`Error inicializando sesión de WhatsApp para usuario ${userId}`, error);
+      session.connectionStatus = 'error';
+      session.socket = null;
     }
   }
 
-  private setupMessageListener() {
-    if (!this.socket) return;
+  private setupMessageListener(userId: number) {
+    const session = this.getUserSession(userId);
+    if (!session.socket) return;
 
-    this.socket.ev.on('messages.upsert', async ({ messages }) => {
+    session.socket.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue;
 
         const senderNumber = msg.key.remoteJid?.split('@')[0] || '';
         
         // Verificar si es número autorizado y obtener userId
-        const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
-        if (!userId) {
+        const msgUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+        if (!msgUserId) {
           this.logger.log(`Mensaje de número no autorizado: ${senderNumber}`);
           continue;
         }
 
         // Procesar documento (Excel)
         if (msg.message.documentMessage) {
-          await this.handleExcelMessage(msg, senderNumber);
+          await this.handleExcelMessage(msg, senderNumber, userId);
         }
         // Procesar mensaje de texto (búsqueda por CUI)
         else if (msg.message.conversation || msg.message.extendedTextMessage) {
-          await this.handleTextMessage(msg, senderNumber);
+          await this.handleTextMessage(msg, senderNumber, userId);
         }
       }
     });
   }
 
-  private async handleExcelMessage(msg: any, senderNumber: string) {
+  private async handleExcelMessage(msg: WAMessage, senderNumber: string, userId: number) {
+    const session = this.getUserSession(userId);
+    
     try {
-      const doc = msg.message.documentMessage;
+      const doc = msg.message?.documentMessage;
+      if (!doc) return;
+      
       const filename = doc.fileName || 'document.xlsx';
 
       if (!filename.endsWith('.xlsx') && !filename.endsWith('.xls')) {
-        await this.sendMessage(senderNumber, 'Por favor, envía un archivo Excel válido (.xlsx o .xls)');
+        await this.sendMessage(userId, senderNumber, 'Por favor, envía un archivo Excel válido (.xlsx o .xls)');
         return;
       }
 
-      this.logger.log(`Recibiendo Excel: ${filename} de ${senderNumber}`);
+      this.logger.log(`Recibiendo Excel: ${filename} de ${senderNumber} para usuario ${userId}`);
 
       // Descargar archivo
       const buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -195,26 +271,26 @@ export class WhatsAppService {
       await fs.writeFile(tempPath, buffer);
 
       // Obtener userId del número autorizado
-      const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
-      if (!userId) {
-        await this.sendMessage(senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
+      const authorizedUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+      if (!authorizedUserId) {
+        await this.sendMessage(userId, senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
         await fs.unlink(tempPath);
         return;
       }
 
       // Procesar Excel
-      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, userId);
+      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, authorizedUserId);
 
       // Eliminar archivo temporal
       await fs.unlink(tempPath);
 
       // Responder
-      await this.sendMessage(senderNumber, result.message);
+      await this.sendMessage(userId, senderNumber, result.message);
 
       // Notificar al frontend a través de WebSocket
       if (this.gateway && result.success) {
-        this.gateway.server.emit('excel-uploaded', {
-          userId,
+        this.gateway.emitExcelUploadedToUser(userId, {
+          userId: authorizedUserId,
           filename,
           recordsCount: result.recordsCount,
         });
@@ -223,35 +299,35 @@ export class WhatsAppService {
       this.logger.log(`Excel procesado: ${result.recordsCount} registros`);
     } catch (error) {
       this.logger.error(`Error procesando Excel: ${error.message}`);
-      await this.sendMessage(senderNumber, `Error al procesar el Excel: ${error.message}`);
+      await this.sendMessage(userId, senderNumber, `Error al procesar el Excel: ${error.message}`);
     }
   }
 
-  private async handleTextMessage(msg: any, senderNumber: string) {
+  private async handleTextMessage(msg: WAMessage, senderNumber: string, userId: number) {
     try {
-      const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
+      const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
       
       // Buscar CUI en el mensaje (formato: dame el CUI XXXXXX o solicito el CUI XXXXXX)
       const cuiMatch = text.match(/CUI[:\s]+(\d+)/i);
       
       if (cuiMatch) {
         const cui = parseInt(cuiMatch[1]);
-        this.logger.log(`Buscando CUI: ${cui}`);
+        this.logger.log(`Buscando CUI: ${cui} para usuario ${userId}`);
 
         // Obtener userId del número autorizado
-        const userId = await this.configService.getUserIdByPhoneNumber(senderNumber);
-        if (!userId) {
-          await this.sendMessage(senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
+        const authorizedUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+        if (!authorizedUserId) {
+          await this.sendMessage(userId, senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
           return;
         }
 
-        const record = await this.recordsService.findByCui(userId, cui);
+        const record = await this.recordsService.findByCui(authorizedUserId, cui);
 
         if (record) {
           const response = this.recordsService.formatRecordResponse(record);
-          await this.sendMessage(senderNumber, response);
+          await this.sendMessage(userId, senderNumber, response);
         } else {
-          await this.sendMessage(senderNumber, `No se encontró información para el CUI ${cui}`);
+          await this.sendMessage(userId, senderNumber, `No se encontró información para el CUI ${cui}`);
         }
       }
     } catch (error) {
@@ -259,19 +335,23 @@ export class WhatsAppService {
     }
   }
 
-  private async sendMessage(phoneNumber: string, message: string): Promise<void> {
-    if (!this.socket) {
+  private async sendMessage(userId: number, phoneNumber: string, message: string): Promise<void> {
+    const session = this.getUserSession(userId);
+    
+    if (!session.socket) {
       throw new Error('Socket no disponible');
     }
 
     const jid = `${phoneNumber}@s.whatsapp.net`;
-    await this.socket.sendMessage(jid, { text: message });
+    await session.socket.sendMessage(jid, { text: message });
   }
 
-  async getQRCode(): Promise<QRCodeData> {
+  async getQRCode(userId: number): Promise<QRCodeData> {
+    const session = this.getUserSession(userId);
+    
     // Si ya está conectado, no generar nuevo QR
-    if (this.connectionStatus === 'connected') {
-      this.logger.log('Ya hay una sesión activa, no se genera QR');
+    if (session.connectionStatus === 'connected') {
+      this.logger.log(`Ya hay una sesión activa para usuario ${userId}, no se genera QR`);
       return {
         qrCode: '',
         status: 'connected',
@@ -279,103 +359,97 @@ export class WhatsAppService {
     }
 
     // Si hay un QR pendiente, devolverlo
-    if (this.connectionStatus === 'connecting' && this.qrCodeString) {
-      this.logger.log('Devolviendo QR existente');
+    if (session.connectionStatus === 'connecting' && session.qrCodeString) {
+      this.logger.log(`Devolviendo QR existente para usuario ${userId}`);
       return {
-        qrCode: this.qrCodeString,
+        qrCode: session.qrCodeString,
         status: 'connecting',
       };
     }
 
     // Solo generar nuevo QR si realmente está desconectado y sin socket activo
-    if (this.connectionStatus === 'disconnected' && !this.socket) {
-      this.logger.log('Generando nuevo QR - No hay sesión activa');
+    if (session.connectionStatus === 'disconnected' || session.connectionStatus === 'error') {
+      this.logger.log(`Generando nuevo QR para usuario ${userId} - No hay sesión activa`);
       
-      this.qrCodeString = null;
-      this.connectionStatus = 'connecting';
-      
-      // Eliminar credenciales anteriores para forzar nuevo QR
-      const authPath = path.join(process.cwd(), 'auth_info');
-      try {
-        await fs.rm(authPath, { recursive: true, force: true });
-        this.logger.log('Credenciales anteriores eliminadas');
-      } catch (e) {
-        // Ignorar si no existen
+      // Limpiar socket anterior si existe
+      if (session.socket) {
+        try {
+          session.socket.end(undefined);
+        } catch (e) {
+          // Ignorar errores al cerrar
+        }
+        session.socket = null;
       }
       
+      session.qrCodeString = null;
+      session.connectionStatus = 'connecting';
+      
+      // Eliminar credenciales anteriores para forzar nuevo QR
+      await this.credentialsService.deleteAllCredentials(userId);
+      this.logger.log(`Credenciales anteriores eliminadas de BD para usuario ${userId}`);
+      
       // Inicializar nueva sesión
-      await this.initializeSession();
+      await this.initializeSession(userId);
       
       // Esperar hasta que se genere el QR (máximo 10 segundos)
       const maxWait = 10000;
       const startTime = Date.now();
       
-      while (!this.qrCodeString && (Date.now() - startTime) < maxWait && this.connectionStatus === 'connecting') {
+      while (!session.qrCodeString && (Date.now() - startTime) < maxWait && session.connectionStatus === 'connecting') {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
 
     return {
-      qrCode: this.qrCodeString || '',
-      status: this.connectionStatus,
+      qrCode: session.qrCodeString || '',
+      status: session.connectionStatus,
     };
   }
 
-  getSessionStatus(): SessionData {
+  getSessionStatus(userId: number): SessionData {
+    const session = this.getUserSession(userId);
     return {
-      isConnected: this.connectionStatus === 'connected',
-      phoneNumber: this.phoneNumber || undefined,
+      isConnected: session.connectionStatus === 'connected',
+      phoneNumber: session.phoneNumber || undefined,
     };
   }
 
-  async disconnect(): Promise<void> {
-    this.logger.log('🔴 Iniciando desconexión completa (logout)');
+  async disconnect(userId: number): Promise<void> {
+    this.logger.log(`🔴 Iniciando desconexión completa (logout) para usuario ${userId}`);
     
-    if (this.socket) {
+    const session = this.getUserSession(userId);
+    
+    if (session.socket) {
       try {
-        this.logger.log('Cerrando sesión de WhatsApp...');
-        await this.socket.logout();
+        this.logger.log(`Cerrando sesión de WhatsApp para usuario ${userId}...`);
+        await session.socket.logout();
       } catch (e) {
-        this.logger.warn(`Advertencia al hacer logout: ${e.message}`);
+        this.logger.warn(`Advertencia al hacer logout para usuario ${userId}: ${e.message}`);
       }
       
-      this.socket = null;
-      this.qrCodeString = null;
-      this.connectionStatus = 'disconnected';
-      this.phoneNumber = null;
-      this.connectionInfo = null;
+      session.socket = null;
+      session.qrCodeString = null;
+      session.connectionStatus = 'disconnected';
+      session.phoneNumber = null;
+      session.connectionInfo = null;
       
-      this.logger.log('Sesión de WhatsApp cerrada');
+      this.logger.log(`Sesión de WhatsApp cerrada para usuario ${userId}`);
     }
     
-    // Eliminar credenciales SIEMPRE al hacer logout explícito
-    const authPath = path.join(process.cwd(), 'auth_info');
-    this.logger.log(`Eliminando credenciales en: ${authPath}`);
-    
-    try {
-      const exists = await fs.access(authPath).then(() => true).catch(() => false);
-      
-      if (exists) {
-        await fs.rm(authPath, { recursive: true, force: true });
-        this.logger.log('✅ Credenciales eliminadas correctamente');
-      } else {
-        this.logger.log('⚠️ No hay credenciales para eliminar');
-      }
-    } catch (e: any) {
-      this.logger.error(`❌ Error eliminando credenciales: ${e.message}`);
-      this.logger.error(`Stack: ${e.stack}`);
-    }
+    // Eliminar credenciales de la BD
+    await this.credentialsService.deleteAllCredentials(userId);
+    this.logger.log(`✅ Credenciales eliminadas de BD para usuario ${userId}`);
     
     // Emitir estado desconectado
     if (this.gateway) {
-      this.gateway.emitConnectionStatus('disconnected');
+      this.gateway.emitConnectionStatusToUser(userId, 'disconnected');
     }
     
-    this.logger.log('🟢 Desconexión completa finalizada');
+    this.logger.log(`🟢 Desconexión completa finalizada para usuario ${userId}`);
   }
 
-  getConnectionInfo(): ConnectionInfo | null {
-    return this.connectionInfo;
+  getConnectionInfo(userId: number): ConnectionInfo | null {
+    const session = this.getUserSession(userId);
+    return session.connectionInfo;
   }
 }
-
