@@ -1,7 +1,8 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { UserEntity } from '../users/user.entity';
 
 @Entity('config')
+@Index(['userId', 'key'], { unique: true }) // Único por usuario + key
 export class ConfigEntity {
   @PrimaryGeneratedColumn()
   id: number;
@@ -13,7 +14,7 @@ export class ConfigEntity {
   @JoinColumn({ name: 'user_id' })
   user: UserEntity;
 
-  @Column({ unique: true })
+  @Column()
   key: string;
 
   @Column()
