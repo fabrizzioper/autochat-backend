@@ -16,6 +16,7 @@ import { WhatsAppGateway } from './whatsapp.gateway';
 import { ConfigService } from '../config/config.service';
 import { ExcelService } from '../excel/excel.service';
 import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
+import { MessageTemplatesService } from '../message-templates/message-templates.service';
 
 interface UserSession {
   socket: WASocket | null;
@@ -41,6 +42,8 @@ export class WhatsAppService {
     private readonly gateway: WhatsAppGateway,
     @Inject(forwardRef(() => WhatsAppCredentialsService))
     private readonly credentialsService: WhatsAppCredentialsService,
+    @Inject(forwardRef(() => MessageTemplatesService))
+    private readonly messageTemplatesService: MessageTemplatesService,
   ) {
     // Ya no cargamos sesiones al arrancar - se cargan cuando el usuario se conecta
   }
@@ -301,14 +304,66 @@ export class WhatsAppService {
     try {
       const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
       
-      // TODO: Implementar búsquedas dinámicas en fase 2
-      // Por ahora, solo logeamos el mensaje
       this.logger.log(`📝 Mensaje de texto recibido de ${senderNumber}: ${text.substring(0, 50)}...`);
       
-      // Respuesta genérica por ahora
-      // await this.sendMessage(userId, senderNumber, 'Las búsquedas dinámicas serán implementadas próximamente.');
+      if (!text) return;
+
+      // Intentar parsear el mensaje en formato "keyword: valor" o "keyword valor"
+      const colonMatch = text.match(/^(\S+)\s*:\s*(.+)$/i);
+      const spaceMatch = text.match(/^(\S+)\s+(.+)$/);
+      
+      let keyword: string | null = null;
+      let searchValue: string | null = null;
+      
+      if (colonMatch) {
+        keyword = colonMatch[1].toLowerCase();
+        searchValue = colonMatch[2].trim();
+      } else if (spaceMatch) {
+        keyword = spaceMatch[1].toLowerCase();
+        searchValue = spaceMatch[2].trim();
+      }
+      
+      if (!keyword || !searchValue) {
+        this.logger.log(`Mensaje no tiene formato de búsqueda válido: ${text}`);
+        return;
+      }
+
+      this.logger.log(`🔍 Buscando keyword="${keyword}" valor="${searchValue}"`);
+
+      // Buscar template activo con esta palabra clave
+      const template = await this.messageTemplatesService.findByKeyword(userId, keyword);
+      
+      if (!template) {
+        this.logger.log(`No hay template configurado para keyword "${keyword}"`);
+        return;
+      }
+
+      this.logger.log(`📋 Template encontrado: "${template.name}" - Buscando en columna "${template.searchColumn}"`);
+
+      // Buscar en los registros dinámicos del Excel asociado
+      const records = await this.excelService.searchDynamicRecords(
+        userId,
+        template.excelId,
+        template.searchColumn,
+        searchValue
+      );
+
+      if (records.length === 0) {
+        await this.sendMessage(userId, senderNumber, `❌ No se encontró ningún registro con ${template.searchColumn} = "${searchValue}"`);
+        return;
+      }
+
+      // Usar el primer registro encontrado
+      const record = records[0];
+      
+      // Procesar la plantilla reemplazando los placeholders
+      const responseMessage = this.messageTemplatesService.processTemplate(template.template, record.rowData);
+      
+      this.logger.log(`✅ Enviando respuesta para ${template.searchColumn}="${searchValue}"`);
+      await this.sendMessage(userId, senderNumber, responseMessage);
+
     } catch (error) {
-      this.logger.error(`Error procesando mensaje: ${error.message}`);
+      this.logger.error(`Error procesando mensaje de búsqueda: ${error.message}`);
     }
   }
 

@@ -8,6 +8,7 @@ import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
 import { ConfigModule } from '../config/config.module';
 import { ExcelModule } from '../excel/excel.module';
 import { AuthModule } from '../auth/auth.module';
+import { MessageTemplatesModule } from '../message-templates/message-templates.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { AuthModule } from '../auth/auth.module';
     forwardRef(() => ConfigModule),
     forwardRef(() => ExcelModule),
     forwardRef(() => AuthModule),
+    forwardRef(() => MessageTemplatesModule),
   ],
   controllers: [WhatsAppController],
   providers: [WhatsAppService, WhatsAppGateway, WhatsAppCredentialsService],
