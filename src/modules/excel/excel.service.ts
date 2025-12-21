@@ -2,41 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
-import { RecordEntity } from '../records/record.entity';
+import { DynamicRecordEntity } from './dynamic-record.entity';
 import * as XLSX from 'xlsx';
 
-interface ExcelRow {
-  CUI: number;
-  NOMBRE_PROYECTO: string;
-  SECTOR: string;
-  ENTIDAD: string;
-  DEPARTAMENTO: string;
-  PROVINCIA: string;
-  DISTRITO: string;
-  ESTADO_PROYECTO: string;
-  TIPO_PROYECTO: string;
-  TIENE_EXPEDIENTE: string;
-  TIENE_CONTRATO: string;
-  TIENE_PROCESO: string;
-  PMI_2026: number;
-  COSTO_TOTAL: number;
-  DEVENGADO_2024: number;
-  PORCENTAJE_DEVENGADO_2024: number;
-  PIM_2025: number;
-  CERTIFICADO_PORCENTAJE: number;
-  COMPROMETIDO_PORCENTAJE: number;
-  DEVENGADO_PORCENTAJE: number;
-  PENDIENTE_FINANCIAR: number;
-  EN_ANEXO_LEY_32185: string;
-  MONTO_LEY_32513: number;
-  ENTIDAD_PROGRAMADORA: string;
-  PORCENTAJE_FINANCIADO_TOTAL: number;
-  CONTINUIDAD_INVERSIONES: string;
-  EN_CS_LEY_32416: string;
-  INCORPORACIONES_2024: string;
-  INCORPORACIONES_2025: string;
-  DEMANDAS_ADICIONALES: string;
-  FECHA_ACTUALIZACION: string;
+interface ProcessResult {
+  success: boolean;
+  recordsCount: number;
+  message: string;
 }
 
 @Injectable()
@@ -46,87 +18,86 @@ export class ExcelService {
   constructor(
     @InjectRepository(ExcelMetadataEntity)
     private readonly metadataRepo: Repository<ExcelMetadataEntity>,
-    @InjectRepository(RecordEntity)
-    private readonly recordRepo: Repository<RecordEntity>,
+    @InjectRepository(DynamicRecordEntity)
+    private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
   ) {}
 
+  // Procesar cualquier Excel de forma dinámica
   async processExcelFile(
     filePath: string,
     filename: string,
     uploadedBy: string,
     userId: number,
-  ): Promise<{ success: boolean; recordsCount: number; message: string }> {
+  ): Promise<ProcessResult> {
     try {
       // Leer archivo Excel
       const workbook = XLSX.readFile(filePath);
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_json<ExcelRow>(sheet);
+      
+      // Obtener como array de arrays para tener control sobre filas
+      const rawData = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
 
-      if (data.length === 0) {
+      if (rawData.length < 2) {
         return {
           success: false,
           recordsCount: 0,
-          message: 'El Excel está vacío',
+          message: 'El Excel debe tener al menos una fila de cabeceras y una de datos',
         };
       }
 
-      // Crear metadata
+      // Primera fila = cabeceras
+      const headers = (rawData[0] as unknown[]).map((h, index) => 
+        h ? String(h).trim() : `Columna_${index + 1}`
+      );
+
+      // Resto = datos
+      const dataRows = rawData.slice(1).filter(row => 
+        Array.isArray(row) && row.some(cell => cell !== null && cell !== undefined && cell !== '')
+      );
+
+      if (dataRows.length === 0) {
+        return {
+          success: false,
+          recordsCount: 0,
+          message: 'El Excel no contiene datos',
+        };
+      }
+
+      // Crear metadata con cabeceras
       const metadata = this.metadataRepo.create({
         userId,
         filename,
-        totalRecords: data.length,
+        totalRecords: dataRows.length,
         uploadedBy,
+        headers,
+        isReactive: true,
       });
       const savedMetadata = await this.metadataRepo.save(metadata);
 
-      // Guardar registros
-      const records = data.map(row => 
-        this.recordRepo.create({
+      // Guardar registros dinámicos
+      const dynamicRecords = dataRows.map((row, rowIndex) => {
+        const rowData: Record<string, unknown> = {};
+        headers.forEach((header, colIndex) => {
+          rowData[header] = (row as unknown[])[colIndex] ?? null;
+        });
+        
+        return this.dynamicRecordRepo.create({
           userId,
           excelId: savedMetadata.id,
-          cui: row.CUI,
-          nombreProyecto: row.NOMBRE_PROYECTO,
-          sector: row.SECTOR,
-          entidad: row.ENTIDAD,
-          departamento: row.DEPARTAMENTO,
-          provincia: row.PROVINCIA,
-          distrito: row.DISTRITO,
-          estadoProyecto: row.ESTADO_PROYECTO,
-          tipoProyecto: row.TIPO_PROYECTO,
-          tieneExpediente: row.TIENE_EXPEDIENTE,
-          tieneContrato: row.TIENE_CONTRATO,
-          tieneProceso: row.TIENE_PROCESO,
-          pmi2026: row.PMI_2026,
-          costoTotal: row.COSTO_TOTAL,
-          devengado2024: row.DEVENGADO_2024,
-          porcentajeDevengado2024: row.PORCENTAJE_DEVENGADO_2024,
-          pim2025: row.PIM_2025,
-          certificadoPorcentaje: row.CERTIFICADO_PORCENTAJE,
-          comprometidoPorcentaje: row.COMPROMETIDO_PORCENTAJE,
-          devengadoPorcentaje: row.DEVENGADO_PORCENTAJE,
-          pendienteFinanciar: row.PENDIENTE_FINANCIAR,
-          enAnexoLey32185: row.EN_ANEXO_LEY_32185,
-          montoLey32513: row.MONTO_LEY_32513,
-          entidadProgramadora: row.ENTIDAD_PROGRAMADORA,
-          porcentajeFinanciadoTotal: row.PORCENTAJE_FINANCIADO_TOTAL,
-          continuidadInversiones: row.CONTINUIDAD_INVERSIONES,
-          enCsLey32416: row.EN_CS_LEY_32416,
-          incorporaciones2024: row.INCORPORACIONES_2024,
-          incorporaciones2025: row.INCORPORACIONES_2025,
-          demandasAdicionales: row.DEMANDAS_ADICIONALES,
-          fechaActualizacion: row.FECHA_ACTUALIZACION,
-        })
-      );
+          rowData,
+          rowIndex: rowIndex + 1, // 1-indexed para ser más legible
+        });
+      });
 
-      await this.recordRepo.save(records);
+      await this.dynamicRecordRepo.save(dynamicRecords);
 
-      this.logger.log(`✅ Excel procesado: ${data.length} registros guardados`);
+      this.logger.log(`✅ Excel procesado: ${dataRows.length} registros con ${headers.length} columnas`);
 
       return {
         success: true,
-        recordsCount: data.length,
-        message: `Excel procesado correctamente. ${data.length} registros guardados en la base de datos.`,
+        recordsCount: dataRows.length,
+        message: `Excel procesado correctamente. ${dataRows.length} registros con ${headers.length} columnas guardados.`,
       };
     } catch (error) {
       this.logger.error(`❌ Error procesando Excel: ${error.message}`);
@@ -145,17 +116,18 @@ export class ExcelService {
     });
   }
 
-  async getRecordsByExcelId(
+  // Obtener registros dinámicos para Excel
+  async getDynamicRecordsByExcelId(
     userId: number,
     excelId: number,
     page: number = 1,
     limit: number = 20,
-  ): Promise<{ data: RecordEntity[]; total: number; totalPages: number }> {
-    const [data, total] = await this.recordRepo.findAndCount({
+  ): Promise<{ data: DynamicRecordEntity[]; total: number; totalPages: number }> {
+    const [data, total] = await this.dynamicRecordRepo.findAndCount({
       where: { userId, excelId },
       skip: (page - 1) * limit,
       take: limit,
-      order: { cui: 'ASC' },
+      order: { rowIndex: 'ASC' },
     });
 
     return {
@@ -179,5 +151,32 @@ export class ExcelService {
     // Eliminar metadata
     await this.metadataRepo.remove(excel);
   }
-}
 
+  // Obtener un Excel específico
+  async getExcelById(userId: number, excelId: number): Promise<ExcelMetadataEntity | null> {
+    return this.metadataRepo.findOne({ 
+      where: { id: excelId, userId },
+    });
+  }
+
+  // Buscar en registros dinámicos por valor de columna
+  async searchDynamicRecords(
+    userId: number,
+    excelId: number,
+    columnName: string,
+    searchValue: string,
+  ): Promise<DynamicRecordEntity[]> {
+    // Buscar todos los registros del Excel
+    const allRecords = await this.dynamicRecordRepo.find({
+      where: { userId, excelId },
+      order: { rowIndex: 'ASC' },
+    });
+
+    // Filtrar por el valor de la columna
+    return allRecords.filter(record => {
+      const cellValue = record.rowData[columnName];
+      if (cellValue === null || cellValue === undefined) return false;
+      return String(cellValue).toLowerCase().includes(searchValue.toLowerCase());
+    });
+  }
+}

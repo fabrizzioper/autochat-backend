@@ -7,7 +7,6 @@ import { WhatsAppCredentialsEntity } from './whatsapp-credentials.entity';
 import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
 import { ConfigModule } from '../config/config.module';
 import { ExcelModule } from '../excel/excel.module';
-import { RecordsModule } from '../records/records.module';
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
@@ -15,7 +14,6 @@ import { AuthModule } from '../auth/auth.module';
     TypeOrmModule.forFeature([WhatsAppCredentialsEntity]),
     forwardRef(() => ConfigModule),
     forwardRef(() => ExcelModule),
-    forwardRef(() => RecordsModule),
     forwardRef(() => AuthModule),
   ],
   controllers: [WhatsAppController],

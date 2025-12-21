@@ -1,6 +1,6 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, OneToMany, ManyToOne, JoinColumn } from 'typeorm';
-import { RecordEntity } from '../records/record.entity';
 import { UserEntity } from '../users/user.entity';
+import { DynamicRecordEntity } from './dynamic-record.entity';
 
 @Entity('excel_metadata')
 export class ExcelMetadataEntity {
@@ -23,10 +23,15 @@ export class ExcelMetadataEntity {
   @Column()
   uploadedBy: string; // Número de teléfono que envió el Excel
 
+  @Column({ type: 'json', nullable: true })
+  headers: string[] | null;
+
+  @Column({ default: true })
+  isReactive: boolean;
+
   @CreateDateColumn()
   uploadedAt: Date;
 
-  @OneToMany(() => RecordEntity, record => record.excel)
-  records: RecordEntity[];
+  @OneToMany(() => DynamicRecordEntity, record => record.excel)
+  records: DynamicRecordEntity[];
 }
-

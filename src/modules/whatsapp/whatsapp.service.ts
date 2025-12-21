@@ -5,7 +5,6 @@ import makeWASocket, {
   WASocket,
   downloadMediaMessage,
   WAMessage,
-  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -16,7 +15,6 @@ import type { QRCodeData, SessionData, ConnectionInfo } from './types/whatsapp.t
 import { WhatsAppGateway } from './whatsapp.gateway';
 import { ConfigService } from '../config/config.service';
 import { ExcelService } from '../excel/excel.service';
-import { RecordsService } from '../records/records.service';
 import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
 
 interface UserSession {
@@ -39,8 +37,6 @@ export class WhatsAppService {
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => ExcelService))
     private readonly excelService: ExcelService,
-    @Inject(forwardRef(() => RecordsService))
-    private readonly recordsService: RecordsService,
     @Inject(forwardRef(() => WhatsAppGateway))
     private readonly gateway: WhatsAppGateway,
     @Inject(forwardRef(() => WhatsAppCredentialsService))
@@ -238,7 +234,7 @@ export class WhatsAppService {
         if (msg.message.documentMessage) {
           await this.handleExcelMessage(msg, senderNumber, userId);
         }
-        // Procesar mensaje de texto (búsqueda por CUI)
+        // Procesar mensaje de texto (TODO: implementar búsquedas dinámicas en fase 2)
         else if (msg.message.conversation || msg.message.extendedTextMessage) {
           await this.handleTextMessage(msg, senderNumber, userId);
         }
@@ -247,8 +243,6 @@ export class WhatsAppService {
   }
 
   private async handleExcelMessage(msg: WAMessage, senderNumber: string, userId: number) {
-    const session = this.getUserSession(userId);
-    
     try {
       const doc = msg.message?.documentMessage;
       if (!doc) return;
@@ -260,7 +254,7 @@ export class WhatsAppService {
         return;
       }
 
-      this.logger.log(`Recibiendo Excel: ${filename} de ${senderNumber} para usuario ${userId}`);
+      this.logger.log(`📊 Recibiendo Excel: ${filename} de ${senderNumber} para usuario ${userId}`);
 
       // Descargar archivo
       const buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -278,7 +272,7 @@ export class WhatsAppService {
         return;
       }
 
-      // Procesar Excel
+      // Procesar Excel (siempre dinámico ahora)
       const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, authorizedUserId);
 
       // Eliminar archivo temporal
@@ -296,9 +290,9 @@ export class WhatsAppService {
         });
       }
 
-      this.logger.log(`Excel procesado: ${result.recordsCount} registros`);
+      this.logger.log(`✅ Excel procesado: ${result.recordsCount} registros`);
     } catch (error) {
-      this.logger.error(`Error procesando Excel: ${error.message}`);
+      this.logger.error(`❌ Error procesando Excel: ${error.message}`);
       await this.sendMessage(userId, senderNumber, `Error al procesar el Excel: ${error.message}`);
     }
   }
@@ -307,29 +301,12 @@ export class WhatsAppService {
     try {
       const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
       
-      // Buscar CUI en el mensaje (formato: dame el CUI XXXXXX o solicito el CUI XXXXXX)
-      const cuiMatch = text.match(/CUI[:\s]+(\d+)/i);
+      // TODO: Implementar búsquedas dinámicas en fase 2
+      // Por ahora, solo logeamos el mensaje
+      this.logger.log(`📝 Mensaje de texto recibido de ${senderNumber}: ${text.substring(0, 50)}...`);
       
-      if (cuiMatch) {
-        const cui = parseInt(cuiMatch[1]);
-        this.logger.log(`Buscando CUI: ${cui} para usuario ${userId}`);
-
-        // Obtener userId del número autorizado
-        const authorizedUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
-        if (!authorizedUserId) {
-          await this.sendMessage(userId, senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
-          return;
-        }
-
-        const record = await this.recordsService.findByCui(authorizedUserId, cui);
-
-        if (record) {
-          const response = this.recordsService.formatRecordResponse(record);
-          await this.sendMessage(userId, senderNumber, response);
-        } else {
-          await this.sendMessage(userId, senderNumber, `No se encontró información para el CUI ${cui}`);
-        }
-      }
+      // Respuesta genérica por ahora
+      // await this.sendMessage(userId, senderNumber, 'Las búsquedas dinámicas serán implementadas próximamente.');
     } catch (error) {
       this.logger.error(`Error procesando mensaje: ${error.message}`);
     }
