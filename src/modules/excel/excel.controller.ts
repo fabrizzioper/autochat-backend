@@ -1,13 +1,13 @@
 import { Controller, Get, Delete, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ExcelService } from './excel.service';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
-import { RecordEntity } from '../records/record.entity';
+import { DynamicRecordEntity } from './dynamic-record.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from '../auth/decorators/get-user.decorator';
 import { UserEntity } from '../users/user.entity';
 
 interface PaginatedResponse {
-  data: RecordEntity[];
+  data: DynamicRecordEntity[];
   total: number;
   totalPages: number;
   currentPage: number;
@@ -23,6 +23,14 @@ export class ExcelController {
     return this.service.getAllExcelMetadata(user.id);
   }
 
+  @Get(':excelId')
+  async getExcelById(
+    @GetUser() user: UserEntity,
+    @Param('excelId', ParseIntPipe) excelId: number,
+  ): Promise<ExcelMetadataEntity | null> {
+    return this.service.getExcelById(user.id, excelId);
+  }
+
   @Get(':excelId/records')
   async getRecordsByExcelId(
     @GetUser() user: UserEntity,
@@ -30,7 +38,7 @@ export class ExcelController {
     @Query('page', ParseIntPipe) page: number = 1,
     @Query('limit', ParseIntPipe) limit: number = 20,
   ): Promise<PaginatedResponse> {
-    const result = await this.service.getRecordsByExcelId(user.id, excelId, page, limit);
+    const result = await this.service.getDynamicRecordsByExcelId(user.id, excelId, page, limit);
     return {
       ...result,
       currentPage: page,
@@ -49,4 +57,3 @@ export class ExcelController {
     };
   }
 }
-
