@@ -267,16 +267,36 @@ export class WhatsAppService {
       await fs.mkdir(path.join(process.cwd(), 'temp'), { recursive: true });
       await fs.writeFile(tempPath, buffer);
 
-      // Obtener userId del número autorizado
-      const authorizedUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
-      if (!authorizedUserId) {
-        await this.sendMessage(userId, senderNumber, 'Tu número no está autorizado. Por favor, configura tu número desde la aplicación.');
+      // Verificar que el número que envía esté autorizado para ESTE usuario (el de la sesión)
+      const isAuthorized = await this.configService.isAuthorized(userId, senderNumber);
+      this.logger.log(`🔍 Debug: senderNumber=${senderNumber}, userId=${userId}, isAuthorized=${isAuthorized}`);
+      
+      if (!isAuthorized) {
+        // El número no está autorizado para este usuario, ignorar silenciosamente
+        this.logger.log(`📊 Excel de ${senderNumber} ignorado - no autorizado para usuario ${userId}`);
         await fs.unlink(tempPath);
         return;
       }
 
-      // Procesar Excel (siempre dinámico ahora)
-      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, authorizedUserId);
+      // Verificar si hay un nombre de archivo configurado para ESTE usuario
+      const reactiveFilename = await this.configService.getReactiveExcelFilename(userId);
+      this.logger.log(`🔍 Debug: reactiveFilename para userId=${userId}: "${reactiveFilename}"`);
+      
+      // Si hay un nombre configurado, verificar que el archivo coincida
+      if (reactiveFilename) {
+        const isMatch = await this.configService.isReactiveFilename(userId, filename);
+        if (!isMatch) {
+          // No coincide, ignorar silenciosamente
+          this.logger.log(`📊 Excel "${filename}" ignorado - no coincide con "${reactiveFilename}"`);
+          await fs.unlink(tempPath);
+          return;
+        }
+      }
+      // Si NO hay nombre configurado, procesar cualquier Excel
+      // (flujo normal sin filtro)
+
+      // Procesar Excel (siempre dinámico ahora) - usar userId de la sesión
+      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, userId);
 
       // Eliminar archivo temporal
       await fs.unlink(tempPath);
@@ -284,10 +304,9 @@ export class WhatsAppService {
       // Responder
       await this.sendMessage(userId, senderNumber, result.message);
 
-      // Notificar al frontend a través de WebSocket
+      // Notificar al frontend a través de WebSocket (al usuario de la sesión)
       if (this.gateway && result.success) {
         this.gateway.emitExcelUploadedToUser(userId, {
-          userId: authorizedUserId,
           filename,
           recordsCount: result.recordsCount,
         });

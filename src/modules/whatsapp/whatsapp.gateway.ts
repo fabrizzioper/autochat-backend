@@ -159,7 +159,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.log(`📊 Info emitida a usuario ${userId}`);
   }
 
-  emitExcelUploadedToUser(userId: number, data: { userId: number; filename: string; recordsCount: number }) {
+  emitExcelUploadedToUser(userId: number, data: { filename: string; recordsCount: number }) {
     const userRoom = `user_${userId}`;
     this.server.to(userRoom).emit('excel-uploaded', data);
     this.logger.log(`📄 Excel uploaded emitido a usuario ${userId}`);
