@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigEntity } from './config.entity';
@@ -8,6 +8,8 @@ const REACTIVE_EXCEL_FILENAME_KEY = 'reactive_excel_filename';
 
 @Injectable()
 export class ConfigService {
+  private readonly logger = new Logger(ConfigService.name);
+
   constructor(
     @InjectRepository(ConfigEntity)
     private readonly repo: Repository<ConfigEntity>,
@@ -35,6 +37,9 @@ export class ConfigService {
         value: phoneNumber,
       });
     }
+    
+    // LOG 2: Número permitido configurado
+    this.logger.log(`[LOG 2] Número permitido configurado para usuario ${userId}: ${phoneNumber}`);
   }
 
   async removeAuthorizedNumber(userId: number): Promise<void> {
