@@ -174,6 +174,9 @@ export class WhatsAppService {
           if (session.socket && session.socket.user?.id) {
             session.phoneNumber = session.socket.user.id.split(':')[0];
             
+            // LOG 1: Número del usuario conectado (cuando escanea QR)
+            this.logger.log(`[LOG 1] Usuario ${userId} conectado con número: ${session.phoneNumber}`);
+            
             // Capturar información de conexión solo si tenemos el número
             if (session.phoneNumber) {
               session.connectionInfo = {
@@ -224,7 +227,45 @@ export class WhatsAppService {
       for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue;
 
-        const senderNumber = msg.key.remoteJid?.split('@')[0] || '';
+        const remoteJid = msg.key.remoteJid || '';
+        
+        // Para WhatsApp Business, usar remoteJidAlt si está disponible (contiene el número real)
+        // En WhatsApp normal, remoteJid ya contiene el número directamente
+        const msgKey = msg.key as { remoteJid?: string; remoteJidAlt?: string; participant?: string };
+        
+        // Determinar el JID efectivo:
+        // 1. Si remoteJidAlt existe y es válido (@s.whatsapp.net), usarlo
+        // 2. Si remoteJid es @s.whatsapp.net, usarlo directamente
+        // 3. Si es @lid sin remoteJidAlt, no podemos procesar
+        let effectiveJid = remoteJid;
+        
+        if (msgKey.remoteJidAlt && msgKey.remoteJidAlt.endsWith('@s.whatsapp.net')) {
+          // WhatsApp Business: usar remoteJidAlt
+          effectiveJid = msgKey.remoteJidAlt;
+        } else if (remoteJid.endsWith('@s.whatsapp.net')) {
+          // WhatsApp normal: usar remoteJid directamente
+          effectiveJid = remoteJid;
+        } else if (remoteJid.endsWith('@lid')) {
+          // Es un LID sin remoteJidAlt - no podemos obtener el número real
+          // Esto puede pasar cuando el receptor (quien escanea QR) usa WhatsApp normal
+          // pero el remitente usa WhatsApp Business
+          this.logger.log(`[DEBUG] LID sin remoteJidAlt: ${remoteJid} | key: ${JSON.stringify(msg.key)}`);
+          continue;
+        }
+        
+        // Ignorar grupos, newsletters, broadcasts, status
+        if (effectiveJid.includes('@g.us') || effectiveJid.includes('@broadcast') || 
+            effectiveJid.includes('@newsletter') || effectiveJid === 'status@broadcast') {
+          continue;
+        }
+
+        // Extraer número de teléfono del JID efectivo
+        const senderNumber = effectiveJid.split('@')[0] || '';
+        
+        // Validar que sea un número de teléfono válido (solo dígitos, 7-15 caracteres)
+        if (!/^\d{7,15}$/.test(senderNumber)) {
+          continue;
+        }
         
         // Verificar si es número autorizado y obtener userId
         const msgUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
@@ -280,7 +321,13 @@ export class WhatsAppService {
 
       // Verificar si hay un nombre de archivo configurado para ESTE usuario
       const reactiveFilename = await this.configService.getReactiveExcelFilename(userId);
-      this.logger.log(`🔍 Debug: reactiveFilename para userId=${userId}: "${reactiveFilename}"`);
+      
+      // LOG 3: Nombre del Excel permitido
+      if (reactiveFilename) {
+        this.logger.log(`[LOG 3] Nombre de Excel permitido para usuario ${userId}: "${reactiveFilename}" | Excel recibido: "${filename}"`);
+      } else {
+        this.logger.log(`[LOG 3] No hay nombre de Excel específico configurado para usuario ${userId} | Procesando cualquier Excel: "${filename}"`);
+      }
       
       // Si hay un nombre configurado, verificar que el archivo coincida
       if (reactiveFilename) {
@@ -301,7 +348,7 @@ export class WhatsAppService {
       // Eliminar archivo temporal
       await fs.unlink(tempPath);
 
-      // Responder
+      // Responder (LOG 4 se genera en sendMessage)
       await this.sendMessage(userId, senderNumber, result.message);
 
       // Notificar al frontend a través de WebSocket (al usuario de la sesión)
@@ -392,6 +439,9 @@ export class WhatsAppService {
     if (!session.socket) {
       throw new Error('Socket no disponible');
     }
+
+    // LOG 4: Número al cual se está enviando mensaje
+    this.logger.log(`[LOG 4] Enviando mensaje desde usuario ${userId} (sesión: ${session.phoneNumber}) hacia: ${phoneNumber}`);
 
     const jid = `${phoneNumber}@s.whatsapp.net`;
     await session.socket.sendMessage(jid, { text: message });
