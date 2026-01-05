@@ -3,12 +3,16 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { DynamicRecordEntity } from './dynamic-record.entity';
-import * as XLSX from 'xlsx';
+import { env } from '../../config/env';
+import FormData from 'form-data';
+import * as fs from 'fs/promises';
+import axios from 'axios';
 
 interface ProcessResult {
   success: boolean;
   recordsCount: number;
   message: string;
+  excelId?: number;
 }
 
 @Injectable()
@@ -22,85 +26,83 @@ export class ExcelService {
     private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
   ) {}
 
-  // Procesar cualquier Excel de forma dinámica
+  // Enviar archivo al microservicio Python que procesa y guarda todo
   async processExcelFile(
     filePath: string,
     filename: string,
     uploadedBy: string,
     userId: number,
   ): Promise<ProcessResult> {
+    const startTime = Date.now();
     try {
-      // Leer archivo Excel
-      const workbook = XLSX.readFile(filePath);
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
+      this.logger.log(`📊 Enviando archivo a microservicio Python: ${filename}`);
       
-      // Obtener como array de arrays para tener control sobre filas
-      const rawData = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
-
-      if (rawData.length < 2) {
+      // Leer archivo como buffer
+      const fileBuffer = await fs.readFile(filePath);
+      
+      // Crear FormData para enviar al microservicio Python
+      const formData = new FormData();
+      formData.append('file', fileBuffer, {
+        filename: filename,
+        contentType: filename.endsWith('.xlsx') 
+          ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          : 'application/vnd.ms-excel',
+      });
+      formData.append('user_id', userId.toString());
+      formData.append('uploaded_by', uploadedBy);
+      
+      // Llamar al microservicio Python (procesa Y guarda en BD)
+      this.logger.log(`🚀 Enviando a: ${env.EXCEL_PROCESSOR_URL}/process`);
+      
+      const response = await axios.post(
+        `${env.EXCEL_PROCESSOR_URL}/process`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+          },
+          timeout: 300000, // 5 minutos timeout para archivos grandes
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        }
+      );
+      
+      const { success, message, recordsCount, excelId, processingTime } = response.data;
+      
+      const endTime = Date.now();
+      const totalDuration = ((endTime - startTime) / 1000).toFixed(2);
+      
+      if (success) {
+        this.logger.log(`✅ Excel procesado y guardado por Python en ${totalDuration}s (procesamiento: ${processingTime}s). Excel ID: ${excelId}`);
+        return {
+          success: true,
+          recordsCount: recordsCount,
+          message: message,
+          excelId: excelId,
+        };
+      } else {
         return {
           success: false,
           recordsCount: 0,
-          message: 'El Excel debe tener al menos una fila de cabeceras y una de datos',
+          message: message || 'Error procesando el Excel',
         };
       }
-
-      // Primera fila = cabeceras
-      const headers = (rawData[0] as unknown[]).map((h, index) => 
-        h ? String(h).trim() : `Columna_${index + 1}`
-      );
-
-      // Resto = datos
-      const dataRows = rawData.slice(1).filter(row => 
-        Array.isArray(row) && row.some(cell => cell !== null && cell !== undefined && cell !== '')
-      );
-
-      if (dataRows.length === 0) {
+    } catch (error: any) {
+      const endTime = Date.now();
+      const duration = ((endTime - startTime) / 1000).toFixed(2);
+      
+      // Manejar errores del microservicio
+      if (error.response) {
+        this.logger.error(`❌ Error del microservicio después de ${duration}s: ${error.response.data?.detail || error.message}`);
         return {
           success: false,
           recordsCount: 0,
-          message: 'El Excel no contiene datos',
+          message: error.response.data?.detail || `Error del microservicio: ${error.message}`,
         };
       }
-
-      // Crear metadata con cabeceras
-      const metadata = this.metadataRepo.create({
-        userId,
-        filename,
-        totalRecords: dataRows.length,
-        uploadedBy,
-        headers,
-        isReactive: true,
-      });
-      const savedMetadata = await this.metadataRepo.save(metadata);
-
-      // Guardar registros dinámicos
-      const dynamicRecords = dataRows.map((row, rowIndex) => {
-        const rowData: Record<string, unknown> = {};
-        headers.forEach((header, colIndex) => {
-          rowData[header] = (row as unknown[])[colIndex] ?? null;
-        });
-        
-        return this.dynamicRecordRepo.create({
-          userId,
-          excelId: savedMetadata.id,
-          rowData,
-          rowIndex: rowIndex + 1, // 1-indexed para ser más legible
-        });
-      });
-
-      await this.dynamicRecordRepo.save(dynamicRecords);
-
-      this.logger.log(`✅ Excel procesado: ${dataRows.length} registros con ${headers.length} columnas`);
-
-      return {
-        success: true,
-        recordsCount: dataRows.length,
-        message: `Excel procesado correctamente. ${dataRows.length} registros con ${headers.length} columnas guardados.`,
-      };
-    } catch (error) {
-      this.logger.error(`❌ Error procesando Excel: ${error.message}`);
+      
+      this.logger.error(`❌ Error enviando archivo al microservicio después de ${duration}s: ${error.message}`);
+      this.logger.error(error.stack);
       return {
         success: false,
         recordsCount: 0,
@@ -135,6 +137,16 @@ export class ExcelService {
       total,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  async getProcessingProgress(excelId: number): Promise<{ progress: number; total: number; processed: number; status: string }> {
+    try {
+      const response = await axios.get(`${env.EXCEL_PROCESSOR_URL}/progress/${excelId}`);
+      return response.data;
+    } catch (error) {
+      this.logger.error(`Error obteniendo progreso: ${error}`);
+      return { progress: 0, total: 0, processed: 0, status: 'error' };
+    }
   }
 
   async deleteExcel(userId: number, excelId: number): Promise<void> {

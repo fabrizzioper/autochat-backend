@@ -41,6 +41,7 @@ services:
       DB_PASSWORD: password
       DB_NAME: autochat_db
       DB_SYNC: true
+      EXCEL_PROCESSOR_URL: http://excel-processor:8001
       NODE_ENV: production
     volumes:
       - ./auth_info:/app/auth_info
@@ -48,8 +49,42 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      excel-processor:
+        condition: service_healthy
     networks:
       - autochat-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  excel-processor:
+    build:
+      context: .
+      dockerfile: excel-processor-service/Dockerfile
+    container_name: autochat-excel-processor
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_NAME: autochat_db
+      EXCEL_PROCESSOR_PORT: 8001
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - autochat-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     logging:
       driver: "json-file"
       options:
