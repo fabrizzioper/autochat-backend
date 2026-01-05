@@ -171,11 +171,11 @@ export class ExcelService {
     });
   }
 
-  // Buscar en registros dinámicos por valor de columna
+  // Buscar en registros dinámicos por valor de columna (soporta múltiples columnas)
   async searchDynamicRecords(
     userId: number,
     excelId: number,
-    columnName: string,
+    columnNames: string | string[], // Una o múltiples columnas
     searchValue: string,
   ): Promise<DynamicRecordEntity[]> {
     // Buscar todos los registros del Excel
@@ -184,11 +184,28 @@ export class ExcelService {
       order: { rowIndex: 'ASC' },
     });
 
-    // Filtrar por el valor de la columna
+    const columns = Array.isArray(columnNames) ? columnNames : [columnNames];
+    const normalizedSearch = this.normalizeSearchValue(searchValue);
+
+    // Filtrar por el valor en cualquiera de las columnas
     return allRecords.filter(record => {
-      const cellValue = record.rowData[columnName];
-      if (cellValue === null || cellValue === undefined) return false;
-      return String(cellValue).toLowerCase().includes(searchValue.toLowerCase());
+      return columns.some(columnName => {
+        const cellValue = record.rowData[columnName];
+        if (cellValue === null || cellValue === undefined) return false;
+        const normalizedCell = this.normalizeSearchValue(String(cellValue));
+        // Búsqueda flexible: completo o parcial
+        return normalizedCell.includes(normalizedSearch) || normalizedSearch.includes(normalizedCell);
+      });
     });
+  }
+
+  // Normalizar valor de búsqueda (sin tildes, minúsculas, sin espacios extra)
+  private normalizeSearchValue(value: string): string {
+    return value
+      .toLowerCase()
+      .trim()
+      .normalize('NFD') // Descompone caracteres con tildes
+      .replace(/[\u0300-\u036f]/g, '') // Elimina tildes
+      .replace(/\s+/g, ' '); // Normaliza espacios
   }
 }

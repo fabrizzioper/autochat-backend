@@ -24,11 +24,11 @@ export class MessageTemplateEntity {
   @Column()
   name: string;
 
-  @Column()
-  keyword: string; // Palabra clave para activar (ej: "buscar", "info", "claro")
+  @Column({ type: 'json' })
+  keywords: string[]; // Palabras clave para activar (ej: ["buscar", "info", "consulta"])
 
-  @Column()
-  searchColumn: string; // Columna donde buscar (ej: "ID", "Codigo")
+  @Column({ type: 'json' })
+  searchColumns: string[]; // Columnas donde buscar (ej: ["CODIGO", "SNIP", "NOMBRE_INVERSION"])
 
   @Column({ type: 'text' })
   template: string; // Plantilla del mensaje con placeholders como {{Nombre}}, {{Email}}

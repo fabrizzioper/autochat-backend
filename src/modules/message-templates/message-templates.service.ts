@@ -6,15 +6,15 @@ import { MessageTemplateEntity } from './message-template.entity';
 interface CreateTemplateDto {
   excelId: number;
   name: string;
-  keyword: string;
-  searchColumn: string;
+  keywords: string[]; // Múltiples palabras clave
+  searchColumns: string[]; // Múltiples columnas de búsqueda
   template: string;
 }
 
 interface UpdateTemplateDto {
   name?: string;
-  keyword?: string;
-  searchColumn?: string;
+  keywords?: string[];
+  searchColumns?: string[];
   template?: string;
   isActive?: boolean;
 }
@@ -48,10 +48,20 @@ export class MessageTemplatesService {
   }
 
   async findByKeyword(userId: number, keyword: string): Promise<MessageTemplateEntity | null> {
-    return this.repo.findOne({
-      where: { userId, keyword: keyword.toLowerCase(), isActive: true },
+    // Buscar templates activos que tengan esta keyword en su array de keywords
+    const templates = await this.repo.find({
+      where: { userId, isActive: true },
       relations: ['excel'],
     });
+    
+    const normalizedKeyword = keyword.toLowerCase().trim();
+    
+    // Buscar template que tenga esta keyword en su array
+    return templates.find(template => 
+      template.keywords && 
+      Array.isArray(template.keywords) &&
+      template.keywords.some(k => k.toLowerCase().trim() === normalizedKeyword)
+    ) || null;
   }
 
   async create(userId: number, dto: CreateTemplateDto): Promise<MessageTemplateEntity> {
@@ -59,8 +69,8 @@ export class MessageTemplatesService {
       userId,
       excelId: dto.excelId,
       name: dto.name,
-      keyword: dto.keyword.toLowerCase(),
-      searchColumn: dto.searchColumn,
+      keywords: dto.keywords.map(k => k.toLowerCase().trim()).filter(k => k),
+      searchColumns: dto.searchColumns.filter(c => c),
       template: dto.template,
     });
 
@@ -71,8 +81,12 @@ export class MessageTemplatesService {
     const template = await this.findById(userId, id);
 
     if (dto.name !== undefined) template.name = dto.name;
-    if (dto.keyword !== undefined) template.keyword = dto.keyword.toLowerCase();
-    if (dto.searchColumn !== undefined) template.searchColumn = dto.searchColumn;
+    if (dto.keywords !== undefined) {
+      template.keywords = dto.keywords.map(k => k.toLowerCase().trim()).filter(k => k);
+    }
+    if (dto.searchColumns !== undefined) {
+      template.searchColumns = dto.searchColumns.filter(c => c);
+    }
     if (dto.template !== undefined) template.template = dto.template;
     if (dto.isActive !== undefined) template.isActive = dto.isActive;
 

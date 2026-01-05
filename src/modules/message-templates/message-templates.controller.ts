@@ -8,15 +8,15 @@ import { UserEntity } from '../users/user.entity';
 interface CreateTemplateDto {
   excelId: number;
   name: string;
-  keyword: string;
-  searchColumn: string;
+  keywords: string[]; // Múltiples palabras clave
+  searchColumns: string[]; // Múltiples columnas de búsqueda
   template: string;
 }
 
 interface UpdateTemplateDto {
   name?: string;
-  keyword?: string;
-  searchColumn?: string;
+  keywords?: string[];
+  searchColumns?: string[];
   template?: string;
   isActive?: boolean;
 }

@@ -404,18 +404,23 @@ export class WhatsAppService {
         return;
       }
 
-      this.logger.log(`📋 Template encontrado: "${template.name}" - Buscando en columna "${template.searchColumn}"`);
-
-      // Buscar en los registros dinámicos del Excel asociado
+      // Obtener columnas de búsqueda (soporta múltiples columnas)
+      const searchColumns = (template.searchColumns && Array.isArray(template.searchColumns) && template.searchColumns.length > 0)
+        ? template.searchColumns
+        : [];
+      
+      this.logger.log(`📋 Template encontrado: "${template.name}" - Buscando en columnas: ${searchColumns.length > 0 ? searchColumns.join(', ') : 'ninguna'}`);
+      
       const records = await this.excelService.searchDynamicRecords(
         userId,
         template.excelId,
-        template.searchColumn,
+        searchColumns,
         searchValue
       );
 
       if (records.length === 0) {
-        await this.sendMessage(userId, senderNumber, `❌ No se encontró ningún registro con ${template.searchColumn} = "${searchValue}"`);
+        const columnsText = searchColumns.length > 0 ? searchColumns.join(' o ') : 'columna';
+        await this.sendMessage(userId, senderNumber, `❌ No se encontró ningún registro con ${columnsText} = "${searchValue}"`);
         return;
       }
 
@@ -425,7 +430,8 @@ export class WhatsAppService {
       // Procesar la plantilla reemplazando los placeholders
       const responseMessage = this.messageTemplatesService.processTemplate(template.template, record.rowData);
       
-      this.logger.log(`✅ Enviando respuesta para ${template.searchColumn}="${searchValue}"`);
+      const columnsText = searchColumns.length > 0 ? searchColumns.join('/') : 'columna';
+      this.logger.log(`✅ Enviando respuesta para ${columnsText}="${searchValue}"`);
       await this.sendMessage(userId, senderNumber, responseMessage);
 
     } catch (error) {

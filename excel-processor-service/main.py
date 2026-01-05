@@ -1,9 +1,9 @@
 """
 Microservicio para procesar archivos Excel de forma rápida y eficiente
 Usa pandas para procesamiento optimizado de Excel y guarda directamente en PostgreSQL
-Optimizado con COPY de PostgreSQL para inserción masiva (10-20x más rápido)
+Optimizado con execute_values para inserción masiva (más rápido que INSERT)
 """
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import os
@@ -16,6 +16,7 @@ from psycopg2.pool import SimpleConnectionPool
 import json
 from typing import Optional, Dict
 import io
+import threading
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -70,15 +71,89 @@ async def get_progress(excel_id: int):
         return processing_progress[excel_id]
     return {"progress": 0, "status": "not_found"}
 
+def process_records_background(excel_id: int, user_id: int, all_values: list, total_records: int, tmp_file_path: str):
+    """Procesar registros en background después de retornar el excelId"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        BATCH_SIZE = 5000
+        total_batches = (len(all_values) + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        for i in range(0, len(all_values), BATCH_SIZE):
+            batch_values = all_values[i:i + BATCH_SIZE]
+            
+            execute_values(
+                cur,
+                """
+                INSERT INTO dynamic_records (user_id, excel_id, "rowData", "rowIndex", "createdAt")
+                VALUES %s
+                """,
+                [(v[0], v[1], v[2], v[3], datetime.now()) for v in batch_values],
+                page_size=BATCH_SIZE
+            )
+            
+            # Actualizar progreso después de cada batch
+            processed = min(i + BATCH_SIZE, len(all_values))
+            progress_pct = min(100, (processed / len(all_values)) * 100)
+            processing_progress[excel_id] = {
+                "progress": round(progress_pct, 1),
+                "total": total_records,
+                "processed": processed,
+                "status": "processing"
+            }
+            
+            # Log cada batch para mejor visibilidad en tiempo real
+            batch_num = (i // BATCH_SIZE) + 1
+            if batch_num % 5 == 0 or batch_num == total_batches or batch_num == 1:
+                logger.info(f"⏳ Progreso: {processed}/{len(all_values)} registros ({progress_pct:.1f}%)")
+        
+        # Commit final
+        conn.commit()
+        
+        # Marcar como completado
+        processing_progress[excel_id] = {
+            "progress": 100,
+            "total": total_records,
+            "processed": len(all_values),
+            "status": "completed"
+        }
+        
+        logger.info(f"✅ Excel {excel_id} procesado completamente: {len(all_values)} registros")
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        processing_progress[excel_id] = {
+            "progress": 0,
+            "total": 0,
+            "processed": 0,
+            "status": "error",
+            "error": str(e)
+        }
+        logger.error(f"❌ Error procesando registros en background para Excel {excel_id}: {str(e)}")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            return_db_connection(conn)
+        # Eliminar archivo temporal
+        try:
+            os.unlink(tmp_file_path)
+        except:
+            pass
+
 @app.post("/process")
 async def process_excel(
     file: UploadFile = File(...),
     user_id: int = Form(...),
-    uploaded_by: str = Form(...)
+    uploaded_by: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Procesa un archivo Excel y lo guarda directamente en PostgreSQL
-    Usa COPY de PostgreSQL para inserción masiva (10-20x más rápido que INSERT)
+    Retorna el excelId inmediatamente después de crear el metadata para permitir polling del progreso
     
     Args:
         file: Archivo Excel
@@ -89,7 +164,7 @@ async def process_excel(
         - success: Si el procesamiento fue exitoso
         - message: Mensaje descriptivo
         - recordsCount: Número de registros guardados
-        - excelId: ID del Excel guardado en la BD
+        - excelId: ID del Excel guardado en la BD (disponible inmediatamente)
     """
     start_time = datetime.now()
     conn = None
@@ -174,16 +249,9 @@ async def process_excel(
                     "status": "processing"
                 }
                 
-                # El excelId ya está disponible aquí, pero el procesamiento continúa
-                # El frontend puede empezar a hacer polling inmediatamente
-                
-                # OPTIMIZACIÓN: Usar execute_values que es mucho más rápido que execute_batch
-                # Para archivos grandes, usar COPY sería aún más rápido, pero execute_values es más simple
-                BATCH_SIZE = 5000  # Batch más grande para mejor rendimiento
+                # Preparar datos para procesamiento en background
                 total_records = len(records)
                 row_index = 1
-                
-                # Preparar datos en formato para execute_values
                 all_values = []
                 for record in records:
                     cleaned_record = {k: v for k, v in record.items() if v is not None and (not isinstance(v, str) or v.strip())}
@@ -196,68 +264,29 @@ async def process_excel(
                         ))
                         row_index += 1
                 
-                # Insertar usando execute_values (más rápido que execute_batch)
-                total_batches = (len(all_values) + BATCH_SIZE - 1) // BATCH_SIZE
+                # IMPORTANTE: Retornar excelId inmediatamente
+                # El procesamiento continuará en background
+                # El frontend puede empezar a hacer polling inmediatamente
                 
-                for i in range(0, len(all_values), BATCH_SIZE):
-                    batch_values = all_values[i:i + BATCH_SIZE]
-                    
-                    execute_values(
-                        cur,
-                        """
-                        INSERT INTO dynamic_records (user_id, excel_id, "rowData", "rowIndex", "createdAt")
-                        VALUES %s
-                        """,
-                        [(v[0], v[1], v[2], v[3], datetime.now()) for v in batch_values],
-                        page_size=BATCH_SIZE
-                    )
-                    
-                    # Actualizar progreso después de cada batch
-                    processed = min(i + BATCH_SIZE, len(all_values))
-                    progress_pct = min(100, (processed / len(all_values)) * 100)
-                    processing_progress[excel_id] = {
-                        "progress": round(progress_pct, 1),
-                        "total": total_records,
-                        "processed": processed,
-                        "status": "processing"
-                    }
-                    
-                    # Log cada 5% para mejor visibilidad
-                    if (i // BATCH_SIZE) % max(1, total_batches // 20) == 0 or i + BATCH_SIZE >= len(all_values):
-                        logger.info(f"⏳ Progreso: {processed}/{len(all_values)} registros ({progress_pct:.1f}%)")
+                # Procesar registros en background
+                background_tasks.add_task(
+                    process_records_background,
+                    excel_id,
+                    user_id,
+                    all_values,
+                    total_records,
+                    tmp_file_path
+                )
                 
-                # Commit final
-                conn.commit()
-                
-                # Marcar como completado
-                processing_progress[excel_id] = {
-                    "progress": 100,
-                    "total": total_records,
-                    "processed": len(all_values),
-                    "status": "completed"
-                }
-                
-                end_time = datetime.now()
-                processing_time = (end_time - start_time).total_seconds()
-                
-                logger.info(f"✅ Excel procesado y guardado en {processing_time:.2f}s: {len(records)} registros")
-                
-                # Limpiar progreso después de 5 minutos
-                import threading
-                def cleanup_progress():
-                    import time
-                    time.sleep(300)  # 5 minutos
-                    if excel_id in processing_progress:
-                        del processing_progress[excel_id]
-                threading.Thread(target=cleanup_progress, daemon=True).start()
-                
+                # Retornar inmediatamente con el excelId
                 return {
                     "success": True,
-                    "message": f"Excel procesado correctamente en {processing_time:.2f}s. {len(records)} registros con {len(headers)} columnas guardados.",
+                    "message": f"Excel iniciado. Procesando {len(records)} registros en background...",
                     "recordsCount": len(records),
                     "excelId": excel_id,
                     "totalColumns": len(headers),
-                    "processingTime": round(processing_time, 2)
+                    "processingTime": 0,
+                    "status": "processing"
                 }
                 
             except Exception as db_error:
@@ -274,19 +303,20 @@ async def process_excel(
                 raise HTTPException(status_code=500, detail=f"Error guardando en base de datos: {str(db_error)}")
             finally:
                 cur.close()
-                
-        finally:
-            # Eliminar archivo temporal
-            try:
-                os.unlink(tmp_file_path)
-            except:
-                pass
-            # Devolver conexión al pool
-            if conn:
                 return_db_connection(conn)
+                conn = None
                 
-    except pd.errors.EmptyDataError:
-        raise HTTPException(status_code=400, detail="El archivo Excel está vacío")
+        except pd.errors.EmptyDataError:
+            raise HTTPException(status_code=400, detail="El archivo Excel está vacío")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error procesando Excel: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error al procesar el Excel: {str(e)}")
+        finally:
+            # No eliminar archivo aquí, se eliminará en background después de procesar
+            pass
+                
     except HTTPException:
         raise
     except Exception as e:
