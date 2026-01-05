@@ -146,6 +146,34 @@ export class ExcelService {
     };
   }
 
+  async getActiveProcess(userId: number): Promise<{ hasActiveProcess: boolean; excelId?: number; filename?: string; progress?: number; total?: number; processed?: number; status?: string; message?: string }> {
+    try {
+      this.logger.log(`🔍 Consultando proceso activo para usuario ${userId}...`);
+      const response = await axios.get(`${env.EXCEL_PROCESSOR_URL}/active-process/${userId}`);
+      const data = response.data;
+      
+      this.logger.log(`📋 Respuesta de Go: hasActiveProcess=${data.hasActiveProcess}, excelId=${data.excelId}, status=${data.status}`);
+      
+      // Si hay proceso activo, también emitir por WebSocket para que el frontend lo reciba
+      if (data.hasActiveProcess && this.gateway) {
+        this.gateway.emitExcelProgressToUser(userId, {
+          excelId: data.excelId,
+          progress: data.progress || 0,
+          total: data.total || 0,
+          processed: data.processed || 0,
+          status: data.status || 'processing',
+          filename: data.filename,
+          message: data.message,
+        });
+      }
+      
+      return data;
+    } catch (error: any) {
+      this.logger.error(`Error obteniendo proceso activo: ${error.message}`);
+      return { hasActiveProcess: false };
+    }
+  }
+
   async getProcessingProgress(excelId: number, userId?: number, filename?: string): Promise<{ progress: number; total: number; processed: number; status: string }> {
     try {
       const response = await axios.get(`${env.EXCEL_PROCESSOR_URL}/progress/${excelId}`);
@@ -189,6 +217,7 @@ export class ExcelService {
     processed: number,
     status: string,
     filename?: string,
+    message?: string,
   ): void {
     if (this.gateway) {
       if (status === 'not_found') {
@@ -201,6 +230,7 @@ export class ExcelService {
           processed,
           status,
           filename,
+          message,
         });
       }
     }

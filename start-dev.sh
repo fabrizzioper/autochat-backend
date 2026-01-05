@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Script para iniciar NestJS y Python en DOS terminales separadas
-# Primero Python, luego NestJS (si Python inicia correctamente)
+# Script para iniciar NestJS y Go Excel Processor en DOS terminales separadas
+# Primero Go, luego NestJS (si Go inicia correctamente)
 
 # Colores
 GREEN='\033[0;32m'
@@ -29,30 +29,26 @@ if [ "$USE_TMUX" = true ] && command -v tmux &> /dev/null; then
     sleep 1
     
     # Crear sesión
-    tmux new-session -d -s autochat-dev -n python
+    tmux new-session -d -s autochat-dev -n excel-go
     
-    # Configurar Python
-    tmux send-keys -t autochat-dev:python "cd $(pwd)/excel-processor-service" C-m
-    tmux send-keys -t autochat-dev:python "if [ ! -d 'venv' ]; then python3 -m venv venv; fi" C-m
-    tmux send-keys -t autochat-dev:python "source venv/bin/activate" C-m
-    tmux send-keys -t autochat-dev:python "pip install --upgrade pip > /dev/null 2>&1" C-m
-    tmux send-keys -t autochat-dev:python "pip install -r requirements.txt" C-m
-    tmux send-keys -t autochat-dev:python "if [ -f '../.env' ]; then export \$(cat '../.env' | grep -v '^#' | xargs); fi" C-m
-    tmux send-keys -t autochat-dev:python "echo '✅ Python iniciando en http://localhost:8001'" C-m
-    tmux send-keys -t autochat-dev:python "python main.py" C-m
+    # Configurar Go
+    tmux send-keys -t autochat-dev:excel-go "cd $(pwd)/excel-processor-go" C-m
+    tmux send-keys -t autochat-dev:excel-go "if [ -f '../.env' ]; then export \$(cat '../.env' | grep -v '^#' | xargs); fi" C-m
+    tmux send-keys -t autochat-dev:excel-go "echo '✅ Excel Processor (Go) iniciando en http://localhost:8001'" C-m
+    tmux send-keys -t autochat-dev:excel-go "go run ." C-m
     
-    # Esperar a que Python inicie
-    echo "⏳ Esperando a que Python inicie (5 segundos)..."
+    # Esperar a que Go inicie
+    echo "⏳ Esperando a que Go inicie (5 segundos)..."
     sleep 5
     
-    # Verificar que Python esté corriendo
+    # Verificar que Go esté corriendo
     if ! curl -s http://localhost:8001/health > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  Python aún no responde, esperando más tiempo...${NC}"
+        echo -e "${YELLOW}⚠️  Go aún no responde, esperando más tiempo...${NC}"
         sleep 5
     fi
     
     if curl -s http://localhost:8001/health > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Python iniciado correctamente${NC}"
+        echo -e "${GREEN}✅ Go Excel Processor iniciado correctamente${NC}"
         
         # Crear ventana NestJS
         tmux new-window -t autochat-dev -n nestjs
@@ -64,13 +60,13 @@ if [ "$USE_TMUX" = true ] && command -v tmux &> /dev/null; then
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "${GREEN}✅ Servicios iniciados en tmux:${NC}"
         echo -e "   Sesión: ${YELLOW}autochat-dev${NC}"
-        echo -e "   🐍 Python:  ventana 'python' (puerto 8001) ✅"
+        echo -e "   🚀 Go:      ventana 'excel-go' (puerto 8001) ✅"
         echo -e "   ⚡ NestJS:  ventana 'nestjs' (puerto 3000)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "Comandos:"
         echo "  tmux attach -t autochat-dev"
-        echo "  Ctrl+B luego 0 = Python, Ctrl+B luego 1 = NestJS"
+        echo "  Ctrl+B luego 0 = Go, Ctrl+B luego 1 = NestJS"
         echo ""
         
         if [ -z "$TMUX" ]; then
@@ -78,7 +74,7 @@ if [ "$USE_TMUX" = true ] && command -v tmux &> /dev/null; then
             tmux attach -t autochat-dev
         fi
     else
-        echo -e "${RED}❌ Python no pudo iniciar. Revisa los logs en tmux.${NC}"
+        echo -e "${RED}❌ Go no pudo iniciar. Revisa los logs en tmux.${NC}"
         echo "  tmux attach -t autochat-dev"
         exit 1
     fi
@@ -87,11 +83,11 @@ if [ "$USE_TMUX" = true ] && command -v tmux &> /dev/null; then
 fi
 
 # Para local: DOS terminales separadas
-echo -e "${GREEN}🐍 [1/2] Abriendo terminal para Python...${NC}"
+echo -e "${GREEN}🚀 [1/2] Abriendo terminal para Go Excel Processor...${NC}"
 
-# Matar procesos anteriores de Python en el puerto 8001
+# Matar procesos anteriores en el puerto 8001
 if lsof -ti:8001 > /dev/null 2>&1; then
-    echo "🛑 Deteniendo proceso anterior de Python en puerto 8001..."
+    echo "🛑 Deteniendo proceso anterior en puerto 8001..."
     lsof -ti:8001 | xargs kill -9 2>/dev/null || true
     sleep 1
 fi
@@ -103,33 +99,22 @@ if lsof -ti:3000 > /dev/null 2>&1; then
     sleep 1
 fi
 
-# Script para Python
-PYTHON_SCRIPT=$(mktemp)
-cat > "$PYTHON_SCRIPT" << 'PYEOF'
+# Script para Go
+GO_SCRIPT=$(mktemp)
+cat > "$GO_SCRIPT" << 'GOEOF'
 #!/bin/bash
-cd excel-processor-service
-
-# Crear venv si no existe
-if [ ! -d "venv" ]; then
-    echo "📦 Creando entorno virtual..."
-    python3 -m venv venv
-fi
-
-# Activar e instalar
-source venv/bin/activate
-pip install --upgrade pip > /dev/null 2>&1
-pip install -r requirements.txt
+cd excel-processor-go
 
 # Cargar .env
 if [ -f "../.env" ]; then
     export $(cat "../.env" | grep -v '^#' | xargs)
 fi
 
-echo "✅ Python iniciando en http://localhost:8001"
-python main.py
-PYEOF
+echo "✅ Excel Processor (Go) iniciando en http://localhost:8001"
+go run .
+GOEOF
 
-chmod +x "$PYTHON_SCRIPT"
+chmod +x "$GO_SCRIPT"
 
 # Script para NestJS
 NESTJS_SCRIPT=$(mktemp)
@@ -144,44 +129,43 @@ chmod +x "$NESTJS_SCRIPT"
 # Abrir DOS terminales separadas según el OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS - abrir DOS ventanas de Terminal separadas
-    echo "Abriendo terminal para Python..."
+    echo "Abriendo terminal para Go Excel Processor..."
     osascript <<EOF
 tell application "Terminal"
     activate
-    do script "cd '$(pwd)' && bash '$PYTHON_SCRIPT'"
+    do script "cd '$(pwd)' && bash '$GO_SCRIPT'"
 end tell
 EOF
     
-    # Esperar a que Python inicie
-    echo "⏳ Esperando a que Python inicie (5 segundos)..."
+    # Esperar a que Go inicie
+    echo "⏳ Esperando a que Go inicie (5 segundos)..."
     sleep 5
     
-    # Verificar que Python esté corriendo
+    # Verificar que Go esté corriendo
     MAX_RETRIES=6
     RETRY_COUNT=0
-    PYTHON_READY=false
+    GO_READY=false
     
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         if curl -s http://localhost:8001/health > /dev/null 2>&1; then
-            PYTHON_READY=true
+            GO_READY=true
             break
         fi
         RETRY_COUNT=$((RETRY_COUNT + 1))
         sleep 2
     done
     
-    if [ "$PYTHON_READY" = false ]; then
-        echo -e "${RED}❌ Python no responde después de $((MAX_RETRIES * 2)) segundos${NC}"
-        echo "Revisa la terminal de Python para ver errores"
-        rm -f "$PYTHON_SCRIPT" "$NESTJS_SCRIPT"
+    if [ "$GO_READY" = false ]; then
+        echo -e "${RED}❌ Go no responde después de $((MAX_RETRIES * 2)) segundos${NC}"
+        echo "Revisa la terminal de Go para ver errores"
+        rm -f "$GO_SCRIPT" "$NESTJS_SCRIPT"
         exit 1
     fi
     
-    echo -e "${GREEN}✅ Python iniciado correctamente${NC}"
+    echo -e "${GREEN}✅ Go Excel Processor iniciado correctamente${NC}"
     echo ""
     echo -e "${GREEN}⚡ [2/2] Abriendo terminal para NestJS...${NC}"
     
-    # Abrir segunda terminal para NestJS
     osascript <<EOF
 tell application "Terminal"
     activate
@@ -190,60 +174,58 @@ end tell
 EOF
     
     echo ""
-    echo -e "${GREEN}✅ DOS terminales abiertas:${NC}"
-    echo -e "   🐍 Python:  http://localhost:8001 (Terminal 1)"
-    echo -e "   ⚡ NestJS:  http://localhost:3000 (Terminal 2)"
-    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}✅ Se abrieron DOS terminales:${NC}"
+    echo -e "   🚀 Terminal 1: Go Excel Processor (puerto 8001) ✅"
+    echo -e "   ⚡ Terminal 2: NestJS (puerto 3000)"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "Los scripts temporales se limpiarán automáticamente cuando cierres las terminales"
+
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    # Linux
+    # Linux con entorno gráfico
     if command -v gnome-terminal &> /dev/null; then
-        echo "Abriendo terminal para Python..."
-        gnome-terminal --title="Python (8001)" -- bash -c "cd '$(pwd)' && bash '$PYTHON_SCRIPT'; exec bash" &
+        echo "Abriendo terminal para Go..."
+        gnome-terminal --title="Go Excel Processor" -- bash -c "cd '$(pwd)' && bash '$GO_SCRIPT'; exec bash"
         
-        # Esperar a que Python inicie
-        echo "⏳ Esperando a que Python inicie (5 segundos)..."
+        # Esperar a que Go inicie
+        echo "⏳ Esperando a que Go inicie (5 segundos)..."
         sleep 5
         
-        # Verificar
-        MAX_RETRIES=6
-        RETRY_COUNT=0
-        PYTHON_READY=false
-        
-        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            if curl -s http://localhost:8001/health > /dev/null 2>&1; then
-                PYTHON_READY=true
-                break
-            fi
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            sleep 2
-        done
-        
-        if [ "$PYTHON_READY" = false ]; then
-            echo -e "${RED}❌ Python no responde${NC}"
-            rm -f "$PYTHON_SCRIPT" "$NESTJS_SCRIPT"
+        # Verificar que Go esté corriendo
+        if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Go Excel Processor iniciado correctamente${NC}"
+            echo -e "${GREEN}⚡ [2/2] Abriendo terminal para NestJS...${NC}"
+            gnome-terminal --title="NestJS" -- bash -c "cd '$(pwd)' && bash '$NESTJS_SCRIPT'; exec bash"
+        else
+            echo -e "${RED}❌ Go no responde. Revisa la terminal de Go para ver errores${NC}"
+            rm -f "$GO_SCRIPT" "$NESTJS_SCRIPT"
             exit 1
         fi
         
-        echo -e "${GREEN}✅ Python iniciado correctamente${NC}"
-        echo ""
-        echo -e "${GREEN}⚡ Abriendo terminal para NestJS...${NC}"
+    elif command -v xterm &> /dev/null; then
+        echo "Abriendo terminal para Go..."
+        xterm -T "Go Excel Processor" -e "cd '$(pwd)' && bash '$GO_SCRIPT'; exec bash" &
         
-        gnome-terminal --title="NestJS (3000)" -- bash -c "cd '$(pwd)' && bash '$NESTJS_SCRIPT'; exec bash" &
+        sleep 5
         
-        echo ""
-        echo -e "${GREEN}✅ DOS terminales abiertas:${NC}"
-        echo -e "   🐍 Python:  http://localhost:8001"
-        echo -e "   ⚡ NestJS:  http://localhost:3000"
+        if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Go iniciado correctamente${NC}"
+            xterm -T "NestJS" -e "cd '$(pwd)' && bash '$NESTJS_SCRIPT'; exec bash" &
+        else
+            echo -e "${RED}❌ Go no responde${NC}"
+            rm -f "$GO_SCRIPT" "$NESTJS_SCRIPT"
+            exit 1
+        fi
     else
-        # Fallback: usar tmux
-        echo -e "${YELLOW}⚠️  No se encontró terminal GUI, usando tmux...${NC}"
+        echo -e "${YELLOW}⚠️ No se encontró terminal gráfica. Usando tmux...${NC}"
         USE_TMUX=true
     fi
-else
-    # Fallback: usar tmux
-    echo -e "${YELLOW}⚠️  Sistema no soportado, usando tmux...${NC}"
-    USE_TMUX=true
+    
+    echo ""
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}✅ Se abrieron DOS terminales:${NC}"
+    echo -e "   🚀 Terminal 1: Go Excel Processor (puerto 8001)"
+    echo -e "   ⚡ Terminal 2: NestJS (puerto 3000)"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 fi
-
-# Limpiar scripts temporales después de un tiempo
-(sleep 10 && rm -f "$PYTHON_SCRIPT" "$NESTJS_SCRIPT") &

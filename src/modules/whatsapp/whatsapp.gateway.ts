@@ -177,10 +177,10 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.log(`📄 Excel uploaded emitido a usuario ${userId}`);
   }
 
-  emitExcelProgressToUser(userId: number, data: { excelId: number; progress: number; total: number; processed: number; status: string; filename?: string }) {
+  emitExcelProgressToUser(userId: number, data: { excelId: number; progress: number; total: number; processed: number; status: string; filename?: string; message?: string }) {
     const userRoom = `user_${userId}`;
     this.server.to(userRoom).emit('excel-progress', data);
-    this.logger.log(`📊 Progreso Excel emitido a usuario ${userId}: ${data.progress.toFixed(1)}% (${data.processed}/${data.total})`);
+    this.logger.log(`📊 Progreso Excel emitido a usuario ${userId}: ${data.status} - ${data.progress?.toFixed(1) || 0}% ${data.message || ''}`);
   }
 
   emitExcelProgressNotFoundToUser(userId: number, excelId: number) {
@@ -191,7 +191,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   // Handler para recibir eventos de progreso desde el Python service vía WebSocket
   @SubscribeMessage('excel-progress-service')
-  handleExcelProgressFromService(client: Socket, data: { excelId: number; userId: number; progress: number; total: number; processed: number; status: string; filename?: string }) {
+  handleExcelProgressFromService(client: Socket, data: { excelId: number; userId: number; progress: number; total: number; processed: number; status: string; filename?: string; message?: string }) {
     // Reenviar al room del usuario
     this.emitExcelProgressToUser(data.userId, {
       excelId: data.excelId,
@@ -200,6 +200,7 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
       processed: data.processed,
       status: data.status,
       filename: data.filename,
+      message: data.message,
     });
   }
 
