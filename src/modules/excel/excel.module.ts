@@ -5,11 +5,13 @@ import { DynamicRecordEntity } from './dynamic-record.entity';
 import { ExcelService } from './excel.service';
 import { ExcelController } from './excel.controller';
 import { AuthModule } from '../auth/auth.module';
+import { WhatsAppModule } from '../whatsapp/whatsapp.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([ExcelMetadataEntity, DynamicRecordEntity]),
     forwardRef(() => AuthModule),
+    forwardRef(() => WhatsAppModule),
   ],
   providers: [ExcelService],
   controllers: [ExcelController],

@@ -1,4 +1,4 @@
-import { Controller, Get, Delete, Post, Param, Query, ParseIntPipe, UseGuards, UseInterceptors, UploadedFile, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Delete, Post, Param, Query, Body, Req, ParseIntPipe, UseGuards, UseInterceptors, UploadedFile, BadRequestException, SetMetadata } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ExcelService } from './excel.service';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
@@ -22,11 +22,13 @@ export class ExcelController {
   constructor(private readonly service: ExcelService) {}
 
   @Get('metadata')
+  @UseGuards(JwtAuthGuard)
   async getAllExcelMetadata(@GetUser() user: UserEntity): Promise<ExcelMetadataEntity[]> {
     return this.service.getAllExcelMetadata(user.id);
   }
 
   @Get(':excelId')
+  @UseGuards(JwtAuthGuard)
   async getExcelById(
     @GetUser() user: UserEntity,
     @Param('excelId', ParseIntPipe) excelId: number,
@@ -35,6 +37,7 @@ export class ExcelController {
   }
 
   @Get(':excelId/records')
+  @UseGuards(JwtAuthGuard)
   async getRecordsByExcelId(
     @GetUser() user: UserEntity,
     @Param('excelId', ParseIntPipe) excelId: number,
@@ -49,6 +52,7 @@ export class ExcelController {
   }
 
   @Delete(':excelId')
+  @UseGuards(JwtAuthGuard)
   async deleteExcel(
     @GetUser() user: UserEntity,
     @Param('excelId', ParseIntPipe) excelId: number,
@@ -61,13 +65,38 @@ export class ExcelController {
   }
 
   @Get('progress/:excelId')
+  @UseGuards(JwtAuthGuard)
   async getProgress(
+    @GetUser() user: UserEntity,
     @Param('excelId', ParseIntPipe) excelId: number,
   ): Promise<{ progress: number; total: number; processed: number; status: string }> {
-    return this.service.getProcessingProgress(excelId);
+    // Obtener filename del Excel para incluirlo en la notificación
+    const excel = await this.service.getExcelById(user.id, excelId);
+    return this.service.getProcessingProgress(excelId, user.id, excel?.filename);
+  }
+
+  @Post('notify-progress')
+  @UseGuards(JwtAuthGuard)
+  async notifyProgress(
+    @Req() req: any,
+    @Body() body: { excelId: number; progress: number; total: number; processed: number; status: string; filename?: string },
+  ): Promise<{ success: boolean }> {
+    // req.user es UserEntity, tiene 'id' no 'userId'
+    const userId = req.user.id;
+    this.service.notifyProgressViaWebSocket(
+      userId,
+      body.excelId,
+      body.progress,
+      body.total,
+      body.processed,
+      body.status,
+      body.filename,
+    );
+    return { success: true };
   }
 
   @Post('upload')
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(FileInterceptor('file', {
     limits: {
       fileSize: 200 * 1024 * 1024, // 200MB
@@ -75,6 +104,7 @@ export class ExcelController {
   }))
   async uploadExcel(
     @GetUser() user: UserEntity,
+    @Req() req: any,
     @UploadedFile() file: { originalname: string; buffer: Buffer },
   ): Promise<{ success: boolean; message: string; recordsCount?: number; excelId?: number }> {
     if (!file) {
@@ -87,6 +117,10 @@ export class ExcelController {
     if (!allowedExtensions.includes(fileExtension)) {
       throw new BadRequestException('El archivo debe ser un Excel (.xlsx o .xls)');
     }
+
+    // Obtener token JWT del header
+    const authHeader = req.headers.authorization;
+    const jwtToken = authHeader?.replace('Bearer ', '') || '';
 
     // Guardar archivo temporalmente
     const tempPath = path.join(process.cwd(), 'temp', `${Date.now()}-${file.originalname}`);
@@ -102,6 +136,7 @@ export class ExcelController {
         file.originalname,
         user.email || 'Usuario',
         user.id,
+        jwtToken,
       );
 
       // Eliminar archivo temporal

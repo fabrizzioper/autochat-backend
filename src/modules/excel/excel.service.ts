@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
@@ -7,6 +7,7 @@ import { env } from '../../config/env';
 import FormData from 'form-data';
 import * as fs from 'fs/promises';
 import axios from 'axios';
+import { WhatsAppGateway } from '../whatsapp/whatsapp.gateway';
 
 interface ProcessResult {
   success: boolean;
@@ -24,6 +25,8 @@ export class ExcelService {
     private readonly metadataRepo: Repository<ExcelMetadataEntity>,
     @InjectRepository(DynamicRecordEntity)
     private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
+    @Inject(forwardRef(() => WhatsAppGateway))
+    private readonly gateway: WhatsAppGateway,
   ) {}
 
   // Enviar archivo al microservicio Python que procesa y guarda todo
@@ -32,6 +35,7 @@ export class ExcelService {
     filename: string,
     uploadedBy: string,
     userId: number,
+    jwtToken?: string,
   ): Promise<ProcessResult> {
     const startTime = Date.now();
     try {
@@ -50,6 +54,9 @@ export class ExcelService {
       });
       formData.append('user_id', userId.toString());
       formData.append('uploaded_by', uploadedBy);
+      if (jwtToken) {
+        formData.append('jwt_token', jwtToken);
+      }
       
       // Llamar al microservicio Python (procesa Y guarda en BD)
       this.logger.log(`🚀 Enviando a: ${env.EXCEL_PROCESSOR_URL}/process`);
@@ -139,13 +146,63 @@ export class ExcelService {
     };
   }
 
-  async getProcessingProgress(excelId: number): Promise<{ progress: number; total: number; processed: number; status: string }> {
+  async getProcessingProgress(excelId: number, userId?: number, filename?: string): Promise<{ progress: number; total: number; processed: number; status: string }> {
     try {
       const response = await axios.get(`${env.EXCEL_PROCESSOR_URL}/progress/${excelId}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error(`Error obteniendo progreso: ${error}`);
-      return { progress: 0, total: 0, processed: 0, status: 'error' };
+      const progressData = response.data;
+      
+      // Emitir evento por WebSocket si hay userId
+      if (userId && this.gateway) {
+        if (progressData.status === 'not_found') {
+          this.gateway.emitExcelProgressNotFoundToUser(userId, excelId);
+        } else {
+          this.gateway.emitExcelProgressToUser(userId, {
+            excelId,
+            progress: progressData.progress || 0,
+            total: progressData.total || 0,
+            processed: progressData.processed || 0,
+            status: progressData.status || 'processing',
+            filename,
+          });
+        }
+      }
+      
+      return progressData;
+    } catch (error: any) {
+      this.logger.error(`Error obteniendo progreso: ${error.message}`);
+      
+      // Si es error 404 o not_found, emitir evento
+      if (userId && this.gateway && (error.response?.status === 404 || error.response?.data?.status === 'not_found')) {
+        this.gateway.emitExcelProgressNotFoundToUser(userId, excelId);
+      }
+      
+      return { progress: 0, total: 0, processed: 0, status: 'not_found' };
+    }
+  }
+
+  // Método para notificar progreso vía WebSocket (llamado por el endpoint de notificación)
+  notifyProgressViaWebSocket(
+    userId: number,
+    excelId: number,
+    progress: number,
+    total: number,
+    processed: number,
+    status: string,
+    filename?: string,
+  ): void {
+    if (this.gateway) {
+      if (status === 'not_found') {
+        this.gateway.emitExcelProgressNotFoundToUser(userId, excelId);
+      } else {
+        this.gateway.emitExcelProgressToUser(userId, {
+          excelId,
+          progress,
+          total,
+          processed,
+          status,
+          filename,
+        });
+      }
     }
   }
 

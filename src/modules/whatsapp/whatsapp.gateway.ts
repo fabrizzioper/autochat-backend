@@ -4,6 +4,7 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
   OnGatewayInit,
+  SubscribeMessage,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger, Inject, forwardRef } from '@nestjs/common';
@@ -43,15 +44,26 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
     // Extraer token del handshake
     const token = client.handshake.auth?.token || client.handshake.query?.token;
     
-    if (!token) {
+    // Permitir conexión sin token si es el servicio Python (identificado por user-agent o header especial)
+    const userAgent = client.handshake.headers['user-agent'] || '';
+    const serviceHeader = client.handshake.headers['x-service-client'];
+    const isServiceClient = userAgent.includes('python-socketio') || serviceHeader === 'excel-processor';
+    
+    if (!token && !isServiceClient) {
       this.logger.warn(`❌ Cliente ${client.id} sin token - Desconectando`);
       client.disconnect();
       return;
     }
     
+    // Si es servicio Python, permitir conexión sin autenticación
+    if (isServiceClient) {
+      this.logger.log(`✅ Cliente servicio Python conectado: ${client.id}`);
+      return; // No necesita unirse a rooms, solo puede emitir eventos
+    }
+    
     let userId: number;
     
-    // Verificar token
+    // Verificar token para clientes normales
     try {
       const decoded = jwt.verify(token as string, env.JWT_SECRET) as unknown as { userId: number; email: string };
       userId = decoded.userId;
@@ -163,6 +175,32 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
     const userRoom = `user_${userId}`;
     this.server.to(userRoom).emit('excel-uploaded', data);
     this.logger.log(`📄 Excel uploaded emitido a usuario ${userId}`);
+  }
+
+  emitExcelProgressToUser(userId: number, data: { excelId: number; progress: number; total: number; processed: number; status: string; filename?: string }) {
+    const userRoom = `user_${userId}`;
+    this.server.to(userRoom).emit('excel-progress', data);
+    this.logger.log(`📊 Progreso Excel emitido a usuario ${userId}: ${data.progress.toFixed(1)}% (${data.processed}/${data.total})`);
+  }
+
+  emitExcelProgressNotFoundToUser(userId: number, excelId: number) {
+    const userRoom = `user_${userId}`;
+    this.server.to(userRoom).emit('excel-progress-not-found', { excelId });
+    this.logger.log(`⚠️ Progreso no encontrado para Excel ${excelId}, usuario ${userId}`);
+  }
+
+  // Handler para recibir eventos de progreso desde el Python service vía WebSocket
+  @SubscribeMessage('excel-progress-service')
+  handleExcelProgressFromService(client: Socket, data: { excelId: number; userId: number; progress: number; total: number; processed: number; status: string; filename?: string }) {
+    // Reenviar al room del usuario
+    this.emitExcelProgressToUser(data.userId, {
+      excelId: data.excelId,
+      progress: data.progress,
+      total: data.total,
+      processed: data.processed,
+      status: data.status,
+      filename: data.filename,
+    });
   }
 
   // Métodos legacy (deprecated)

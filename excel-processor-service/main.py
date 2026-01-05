@@ -17,6 +17,8 @@ import json
 from typing import Optional, Dict
 import io
 import threading
+import httpx
+import socketio
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,111 @@ db_pool: Optional[SimpleConnectionPool] = None
 
 # Diccionario para guardar progreso de procesamiento
 processing_progress: Dict[int, Dict] = {}
+
+# URL del backend NestJS para notificar progreso
+BACKEND_URL = os.getenv('BACKEND_URL', 'http://localhost:3000')
+BACKEND_WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://')
+
+# Cliente WebSocket global (se inicializa al arrancar)
+socketio_client: Optional[socketio.Client] = None
+ws_connected = False
+
+def init_websocket_client():
+    """Inicializar cliente WebSocket para conectar al backend"""
+    global socketio_client, ws_connected
+    try:
+        socketio_client = socketio.Client(
+            reconnection=True,
+            reconnection_attempts=10,
+            reconnection_delay=1,
+            reconnection_delay_max=5,
+        )
+        
+        @socketio_client.event
+        def connect():
+            global ws_connected
+            ws_connected = True
+            logger.info("✅ WebSocket conectado al backend")
+        
+        @socketio_client.event
+        def disconnect():
+            global ws_connected
+            ws_connected = False
+            logger.warning("⚠️ WebSocket desconectado del backend")
+        
+        # Conectar al backend identificándose como servicio Python
+        try:
+            socketio_client.connect(
+                BACKEND_WS_URL,
+                wait_timeout=5,
+                headers={
+                    'User-Agent': 'python-socketio/excel-processor',
+                    'X-Service-Client': 'excel-processor'
+                }
+            )
+            logger.info(f"🔌 WebSocket conectado a {BACKEND_WS_URL}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo conectar WebSocket: {str(e)}. Usando HTTP como fallback.")
+            ws_connected = False
+    except Exception as e:
+        logger.error(f"❌ Error inicializando WebSocket: {str(e)}")
+        socketio_client = None
+        ws_connected = False
+
+def notify_backend_progress(excel_id: int, user_id: int, progress_data: Dict, filename: Optional[str] = None, jwt_token: Optional[str] = None):
+    """Notificar al backend sobre el progreso del Excel vía WebSocket (no bloquea)"""
+    def _notify():
+        global socketio_client, ws_connected
+        progress_pct = progress_data.get("progress", 0)
+        
+        try:
+            # Intentar usar WebSocket si está conectado
+            if socketio_client and ws_connected and socketio_client.connected:
+                try:
+                    # Emitir evento directamente - el backend lo recibirá y emitirá al room del usuario
+                    socketio_client.emit('excel-progress-service', {
+                        "excelId": excel_id,
+                        "userId": user_id,
+                        "progress": progress_pct,
+                        "total": progress_data.get("total", 0),
+                        "processed": progress_data.get("processed", 0),
+                        "status": progress_data.get("status", "processing"),
+                        "filename": filename,
+                    })
+                    # Log solo cada 10% o al completar
+                    if progress_pct >= 100 or int(progress_pct) % 10 == 0:
+                        logger.info(f"📡 [WS] Progreso enviado: Excel {excel_id} -> {progress_pct:.1f}%")
+                    return  # Éxito con WebSocket
+                except Exception as ws_err:
+                    logger.warning(f"⚠️ [WS] Error enviando: {str(ws_err)}, usando HTTP...")
+                    ws_connected = False
+            
+            # Fallback a HTTP si WebSocket no está disponible
+            # Solo usar HTTP si tenemos token JWT (endpoint requiere autenticación)
+            if jwt_token:
+                response = httpx.post(
+                    f"{BACKEND_URL}/excel/notify-progress",
+                    json={
+                        "excelId": excel_id,
+                        "progress": progress_pct,
+                        "total": progress_data.get("total", 0),
+                        "processed": progress_data.get("processed", 0),
+                        "status": progress_data.get("status", "processing"),
+                        "filename": filename,
+                    },
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                    timeout=2.0,
+                )
+            # Log solo cada 10% o al completar
+            if progress_pct >= 100 or int(progress_pct) % 10 == 0:
+                logger.info(f"📡 [HTTP] Progreso enviado: Excel {excel_id} -> {progress_pct:.1f}% (status: {response.status_code})")
+        except Exception as e:
+            # Solo loggear errores importantes
+            if progress_pct >= 100:
+                logger.error(f"❌ Error notificando progreso final: {str(e)}")
+    
+    # Ejecutar en thread separado para no bloquear
+    threading.Thread(target=_notify, daemon=True).start()
 
 def get_db_connection():
     """Obtener conexión de la base de datos - usa las mismas variables del .env del backend"""
@@ -71,7 +178,7 @@ async def get_progress(excel_id: int):
         return processing_progress[excel_id]
     return {"progress": 0, "status": "not_found"}
 
-def process_records_background(excel_id: int, user_id: int, all_values: list, total_records: int, tmp_file_path: str):
+def process_records_background(excel_id: int, user_id: int, all_values: list, total_records: int, tmp_file_path: str, filename: Optional[str] = None, jwt_token: Optional[str] = None):
     """Procesar registros en background después de retornar el excelId"""
     conn = None
     try:
@@ -97,12 +204,16 @@ def process_records_background(excel_id: int, user_id: int, all_values: list, to
             # Actualizar progreso después de cada batch
             processed = min(i + BATCH_SIZE, len(all_values))
             progress_pct = min(100, (processed / len(all_values)) * 100)
-            processing_progress[excel_id] = {
+            progress_data = {
                 "progress": round(progress_pct, 1),
                 "total": total_records,
                 "processed": processed,
                 "status": "processing"
             }
+            processing_progress[excel_id] = progress_data
+            
+            # Notificar al backend cada vez que hay progreso (no bloquea)
+            notify_backend_progress(excel_id, user_id, progress_data, filename, jwt_token)
             
             # Log cada batch para mejor visibilidad en tiempo real
             batch_num = (i // BATCH_SIZE) + 1
@@ -113,12 +224,16 @@ def process_records_background(excel_id: int, user_id: int, all_values: list, to
         conn.commit()
         
         # Marcar como completado
-        processing_progress[excel_id] = {
+        completed_data = {
             "progress": 100,
             "total": total_records,
             "processed": len(all_values),
             "status": "completed"
         }
+        processing_progress[excel_id] = completed_data
+        
+        # Notificar al backend que está completo
+        notify_backend_progress(excel_id, user_id, completed_data, filename, jwt_token)
         
         logger.info(f"✅ Excel {excel_id} procesado completamente: {len(all_values)} registros")
         
@@ -149,6 +264,7 @@ async def process_excel(
     file: UploadFile = File(...),
     user_id: int = Form(...),
     uploaded_by: str = Form(...),
+    jwt_token: Optional[str] = Form(None),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
@@ -159,6 +275,7 @@ async def process_excel(
         file: Archivo Excel
         user_id: ID del usuario que sube el archivo
         uploaded_by: Nombre/email del usuario que sube el archivo
+        jwt_token: Token JWT del usuario para notificaciones al backend
     
     Returns:
         - success: Si el procesamiento fue exitoso
@@ -275,7 +392,9 @@ async def process_excel(
                     user_id,
                     all_values,
                     total_records,
-                    tmp_file_path
+                    tmp_file_path,
+                    file.filename,
+                    jwt_token
                 )
                 
                 # Retornar inmediatamente con el excelId
