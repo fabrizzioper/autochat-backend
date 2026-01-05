@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { ConfigEntity } from './config.entity';
 
 const AUTHORIZED_NUMBER_KEY = 'authorized_number';
+const ALLOW_ALL_NUMBERS_KEY = 'allow_all_numbers';
 const REACTIVE_EXCEL_FILENAME_KEY = 'reactive_excel_filename';
 
 @Injectable()
@@ -16,39 +17,100 @@ export class ConfigService {
   ) {}
 
   async getAuthorizedNumber(userId: number): Promise<string | null> {
-    const config = await this.repo.findOne({ 
-      where: { userId, key: AUTHORIZED_NUMBER_KEY },
-    });
-    return config?.value || null;
+    const numbers = await this.getAuthorizedNumbersList(userId);
+    return numbers.length > 0 ? numbers[0] : null;
   }
 
   async setAuthorizedNumber(userId: number, phoneNumber: string): Promise<void> {
-    const existing = await this.repo.findOne({ 
-      where: { userId, key: AUTHORIZED_NUMBER_KEY },
-    });
-    
-    if (existing) {
-      existing.value = phoneNumber;
-      await this.repo.save(existing);
-    } else {
-      await this.repo.save({
-        userId,
-        key: AUTHORIZED_NUMBER_KEY,
-        value: phoneNumber,
-      });
-    }
-    
-    // LOG 2: Número permitido configurado
-    this.logger.log(`[LOG 2] Número permitido configurado para usuario ${userId}: ${phoneNumber}`);
+    // Si viene un solo número, lo agregamos a la lista
+    await this.addAuthorizedNumbers(userId, [phoneNumber]);
   }
 
   async removeAuthorizedNumber(userId: number): Promise<void> {
     await this.repo.delete({ userId, key: AUTHORIZED_NUMBER_KEY });
   }
 
+  async isAllowAllNumbers(userId: number): Promise<boolean> {
+    const config = await this.repo.findOne({ 
+      where: { userId, key: ALLOW_ALL_NUMBERS_KEY },
+    });
+    return config?.value === 'true';
+  }
+
+  async setAllowAllNumbers(userId: number, allow: boolean): Promise<void> {
+    const existing = await this.repo.findOne({ 
+      where: { userId, key: ALLOW_ALL_NUMBERS_KEY },
+    });
+    
+    if (existing) {
+      existing.value = allow ? 'true' : 'false';
+      await this.repo.save(existing);
+    } else {
+      await this.repo.save({
+        userId,
+        key: ALLOW_ALL_NUMBERS_KEY,
+        value: allow ? 'true' : 'false',
+      });
+    }
+    
+    this.logger.log(`[LOG 2] Permitir todos los números ${allow ? 'activado' : 'desactivado'} para usuario ${userId}`);
+  }
+
+  async addAuthorizedNumbers(userId: number, phoneNumbers: string[]): Promise<void> {
+    const existing = await this.repo.findOne({ 
+      where: { userId, key: AUTHORIZED_NUMBER_KEY },
+    });
+    
+    const uniqueNumbers = [...new Set(phoneNumbers)].filter(n => n.trim().length > 0);
+    const currentNumbers = existing?.value ? existing.value.split(',').filter(n => n.trim().length > 0) : [];
+    const allNumbers = [...new Set([...currentNumbers, ...uniqueNumbers])];
+    
+    if (existing) {
+      existing.value = allNumbers.join(',');
+      await this.repo.save(existing);
+    } else {
+      await this.repo.save({
+        userId,
+        key: AUTHORIZED_NUMBER_KEY,
+        value: allNumbers.join(','),
+      });
+    }
+    
+    this.logger.log(`[LOG 2] ${uniqueNumbers.length} números agregados para usuario ${userId}`);
+  }
+
+  async getAuthorizedNumbersList(userId: number): Promise<string[]> {
+    const config = await this.repo.findOne({ 
+      where: { userId, key: AUTHORIZED_NUMBER_KEY },
+    });
+    if (!config?.value) return [];
+    return config.value.split(',').map(n => n.trim()).filter(n => n.length > 0);
+  }
+
+  async removeAuthorizedNumberFromList(userId: number, phoneNumber: string): Promise<void> {
+    const existing = await this.repo.findOne({ 
+      where: { userId, key: AUTHORIZED_NUMBER_KEY },
+    });
+    
+    if (existing && existing.value) {
+      const numbers = existing.value.split(',').map(n => n.trim()).filter(n => n.length > 0 && n !== phoneNumber);
+      if (numbers.length > 0) {
+        existing.value = numbers.join(',');
+        await this.repo.save(existing);
+      } else {
+        await this.repo.delete({ userId, key: AUTHORIZED_NUMBER_KEY });
+      }
+    }
+  }
+
   async isAuthorized(userId: number, phoneNumber: string): Promise<boolean> {
-    const authorized = await this.getAuthorizedNumber(userId);
-    return authorized === phoneNumber;
+    // Si está en modo "permitir todos", retornar true
+    const allowAll = await this.isAllowAllNumbers(userId);
+    if (allowAll) return true;
+    
+    // Si no, verificar en la lista de números autorizados
+    const numbers = await this.getAuthorizedNumbersList(userId);
+    return numbers.includes(phoneNumber);
   }
 
   async getUserIdByPhoneNumber(phoneNumber: string): Promise<number | null> {
