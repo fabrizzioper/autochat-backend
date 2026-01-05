@@ -304,6 +304,9 @@ async def process_excel(
             # Leer Excel con pandas (muy optimizado)
             engine = 'openpyxl' if file.filename.endswith('.xlsx') else 'xlrd'
             
+            logger.info(f"📖 Iniciando lectura de Excel: {file.filename} (engine: {engine})")
+            logger.info(f"📏 Tamaño del archivo: {len(content)} bytes")
+            
             df = pd.read_excel(
                 tmp_file_path,
                 engine=engine,
