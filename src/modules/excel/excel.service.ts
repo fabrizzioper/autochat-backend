@@ -838,17 +838,19 @@ export class ExcelService implements OnModuleInit {
     // ⚡ BÚSQUEDA ULTRA RÁPIDA: Usar SQL nativo con índices
     // Escapar nombres de columna para seguridad (evitar SQL injection)
     const escapeColumnName = (col: string) => col.replace(/'/g, "''");
+    const lowerSearch = normalizedSearch.toLowerCase();
     
-    // Primero intentar búsqueda EXACTA (más rápida con índices)
+    // ⚡ BÚSQUEDA EXACTA con LOWER() - USA el índice creado sobre LOWER("rowData" ->> 'column')
     const exactConditions = columns.map(col => {
       const safeCol = escapeColumnName(col);
-      return `"rowData" ->> '${safeCol}' = $1`;
+      return `LOWER("rowData" ->> '${safeCol}') = $1`;
     }).join(' OR ');
     
+    // Orden optimizado: excel_id primero para usar índice parcial
     const exactQuery = `
       SELECT * FROM dynamic_records 
-      WHERE user_id = $2 
-        AND excel_id = $3 
+      WHERE excel_id = $2 
+        AND user_id = $3 
         AND (${exactConditions})
       ORDER BY "rowIndex" ASC
       LIMIT 10
@@ -856,15 +858,15 @@ export class ExcelService implements OnModuleInit {
 
     try {
       // Usar query nativa para máxima velocidad
-      const exactResults = await this.dynamicRecordRepo.query(exactQuery, [normalizedSearch, userId, excelId]);
+      const exactResults = await this.dynamicRecordRepo.query(exactQuery, [lowerSearch, excelId, userId]);
       
       if (exactResults.length > 0) {
         const duration = Date.now() - startTime;
-        this.logger.log(`⚡ Búsqueda EXACTA completada en ${duration}ms: ${exactResults.length} resultados`);
+        this.logger.log(`⚡ Búsqueda EXACTA completada en ${duration}ms: ${exactResults.length} resultados (índice usado)`);
         return this.mapRawResults(exactResults);
       }
       
-      // Si no hay resultados exactos, buscar parcial con LOWER para case-insensitive
+      // Si no hay resultados exactos, buscar parcial con LIKE
       const partialConditions = columns.map(col => {
         const safeCol = escapeColumnName(col);
         return `LOWER("rowData" ->> '${safeCol}') LIKE $1`;
@@ -872,14 +874,14 @@ export class ExcelService implements OnModuleInit {
       
       const partialQuery = `
         SELECT * FROM dynamic_records 
-        WHERE user_id = $2 
-          AND excel_id = $3 
+        WHERE excel_id = $2 
+          AND user_id = $3 
           AND (${partialConditions})
         ORDER BY "rowIndex" ASC
         LIMIT 10
       `;
       
-      const partialResults = await this.dynamicRecordRepo.query(partialQuery, [`%${normalizedSearch.toLowerCase()}%`, userId, excelId]);
+      const partialResults = await this.dynamicRecordRepo.query(partialQuery, [`%${lowerSearch}%`, excelId, userId]);
       const duration = Date.now() - startTime;
       this.logger.log(`⚡ Búsqueda PARCIAL completada en ${duration}ms: ${partialResults.length} resultados`);
       
@@ -948,6 +950,10 @@ export class ExcelService implements OnModuleInit {
           this.logger.warn(`  ⚠️ Error creando índice ${indexName}: ${indexError.message}`);
         }
       }
+
+      // ⚡ ANALYZE para actualizar estadísticas y optimizar consultas
+      await this.dataSource.query(`ANALYZE dynamic_records;`);
+      this.logger.log(`  📊 Estadísticas actualizadas`);
 
       const duration = Date.now() - startTime;
       this.logger.log(`⚡ ${indexedHeaders.length} índices creados en ${duration}ms para Excel ${excelId}`);
