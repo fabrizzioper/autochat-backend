@@ -1,6 +1,6 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { DynamicRecordEntity } from './dynamic-record.entity';
 import { env } from '../../config/env';
@@ -32,7 +32,7 @@ interface PendingUpload {
 }
 
 @Injectable()
-export class ExcelService {
+export class ExcelService implements OnModuleInit {
   private readonly logger = new Logger(ExcelService.name);
   
   // Mapa de uploads pendientes (esperando selección de cabeceras)
@@ -45,7 +45,13 @@ export class ExcelService {
     private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
     @Inject(forwardRef(() => WhatsAppGateway))
     private readonly gateway: WhatsAppGateway,
+    private readonly dataSource: DataSource,
   ) {}
+
+  // ⚡ Inicialización del módulo - índices se crean por columna al procesar cada Excel
+  async onModuleInit() {
+    this.logger.log('⚡ ExcelService inicializado - índices por columna se crean al procesar cada Excel');
+  }
 
   // ============================================================================
   // NUEVO FLUJO: FASE 1 - Leer solo cabeceras
@@ -634,10 +640,29 @@ export class ExcelService {
   }
 
   async getAllExcelMetadata(userId: number): Promise<ExcelMetadataEntity[]> {
-    return this.metadataRepo.find({ 
+    // ⚡ Solo devolver excels que tienen registros (totalRecords > 0)
+    // Los excels con 0 registros son subidas incompletas/canceladas
+    const excels = await this.metadataRepo.find({ 
       where: { userId },
       order: { uploadedAt: 'DESC' },
     });
+    
+    // Filtrar los que tienen registros
+    return excels.filter(excel => excel.totalRecords > 0);
+  }
+  
+  // Limpiar excels con 0 registros (subidas incompletas)
+  async cleanupEmptyExcels(userId: number): Promise<number> {
+    const emptyExcels = await this.metadataRepo.find({
+      where: { userId, totalRecords: 0 },
+    });
+    
+    if (emptyExcels.length > 0) {
+      await this.metadataRepo.remove(emptyExcels);
+      this.logger.log(`🗑️ Limpiados ${emptyExcels.length} excels vacíos para usuario ${userId}`);
+    }
+    
+    return emptyExcels.length;
   }
 
   // Obtener registros dinámicos para Excel
@@ -779,6 +804,9 @@ export class ExcelService {
       throw new Error('Excel no encontrado o no tienes permiso para eliminarlo');
     }
 
+    // ⚡ Eliminar índices asociados a este Excel
+    await this.dropIndexesForExcel(excelId);
+
     // Eliminar registros asociados (se eliminan automáticamente por onDelete: 'CASCADE')
     // Eliminar metadata
     await this.metadataRepo.remove(excel);
@@ -791,31 +819,88 @@ export class ExcelService {
     });
   }
 
-  // Buscar en registros dinámicos por valor de columna (soporta múltiples columnas)
+  // ⚡ Buscar en registros dinámicos por valor de columna (ULTRA OPTIMIZADO)
   async searchDynamicRecords(
     userId: number,
     excelId: number,
     columnNames: string | string[], // Una o múltiples columnas
     searchValue: string,
   ): Promise<DynamicRecordEntity[]> {
-    // Buscar todos los registros del Excel
-    const allRecords = await this.dynamicRecordRepo.find({
-      where: { userId, excelId },
-      order: { rowIndex: 'ASC' },
-    });
-
     const columns = Array.isArray(columnNames) ? columnNames : [columnNames];
-    const normalizedSearch = this.normalizeSearchValue(searchValue);
+    const normalizedSearch = searchValue.trim();
+    
+    if (columns.length === 0 || !normalizedSearch) {
+      return [];
+    }
 
-    // Filtrar por el valor en cualquiera de las columnas
-    return allRecords.filter(record => {
-      return columns.some(columnName => {
-        const cellValue = record.rowData[columnName];
-        if (cellValue === null || cellValue === undefined) return false;
-        const normalizedCell = this.normalizeSearchValue(String(cellValue));
-        // Búsqueda flexible: completo o parcial
-        return normalizedCell.includes(normalizedSearch) || normalizedSearch.includes(normalizedCell);
-      });
+    const startTime = Date.now();
+
+    // ⚡ BÚSQUEDA ULTRA RÁPIDA: Usar SQL nativo con índices
+    // Escapar nombres de columna para seguridad (evitar SQL injection)
+    const escapeColumnName = (col: string) => col.replace(/'/g, "''");
+    
+    // Primero intentar búsqueda EXACTA (más rápida con índices)
+    const exactConditions = columns.map(col => {
+      const safeCol = escapeColumnName(col);
+      return `"rowData" ->> '${safeCol}' = $1`;
+    }).join(' OR ');
+    
+    const exactQuery = `
+      SELECT * FROM dynamic_records 
+      WHERE user_id = $2 
+        AND excel_id = $3 
+        AND (${exactConditions})
+      ORDER BY "rowIndex" ASC
+      LIMIT 10
+    `;
+
+    try {
+      // Usar query nativa para máxima velocidad
+      const exactResults = await this.dynamicRecordRepo.query(exactQuery, [normalizedSearch, userId, excelId]);
+      
+      if (exactResults.length > 0) {
+        const duration = Date.now() - startTime;
+        this.logger.log(`⚡ Búsqueda EXACTA completada en ${duration}ms: ${exactResults.length} resultados`);
+        return this.mapRawResults(exactResults);
+      }
+      
+      // Si no hay resultados exactos, buscar parcial con LOWER para case-insensitive
+      const partialConditions = columns.map(col => {
+        const safeCol = escapeColumnName(col);
+        return `LOWER("rowData" ->> '${safeCol}') LIKE $1`;
+      }).join(' OR ');
+      
+      const partialQuery = `
+        SELECT * FROM dynamic_records 
+        WHERE user_id = $2 
+          AND excel_id = $3 
+          AND (${partialConditions})
+        ORDER BY "rowIndex" ASC
+        LIMIT 10
+      `;
+      
+      const partialResults = await this.dynamicRecordRepo.query(partialQuery, [`%${normalizedSearch.toLowerCase()}%`, userId, excelId]);
+      const duration = Date.now() - startTime;
+      this.logger.log(`⚡ Búsqueda PARCIAL completada en ${duration}ms: ${partialResults.length} resultados`);
+      
+      return this.mapRawResults(partialResults);
+    } catch (error) {
+      this.logger.error(`Error en búsqueda: ${error.message}`);
+      return [];
+    }
+  }
+  
+  // Mapear resultados raw a entidades
+  private mapRawResults(rawResults: any[]): DynamicRecordEntity[] {
+    return rawResults.map(row => {
+      const record = new DynamicRecordEntity();
+      record.id = row.id;
+      record.userId = row.user_id;
+      record.excelId = row.excel_id;
+      record.rowData = row.rowData;
+      record.rowIndex = row.rowIndex;
+      record.createdAt = row.createdAt;
+      return record;
     });
   }
 
@@ -827,5 +912,67 @@ export class ExcelService {
       .normalize('NFD') // Descompone caracteres con tildes
       .replace(/[\u0300-\u036f]/g, '') // Elimina tildes
       .replace(/\s+/g, ' '); // Normaliza espacios
+  }
+
+  // ⚡ CREAR ÍNDICES REALES EN POSTGRESQL para las columnas indexadas
+  async createRealIndexesForExcel(excelId: number, userId: number): Promise<void> {
+    const startTime = Date.now();
+    
+    try {
+      // Obtener las cabeceras indexadas de la metadata
+      const metadata = await this.metadataRepo.findOne({ where: { id: excelId, userId } });
+      
+      if (!metadata || !metadata.indexedHeaders || metadata.indexedHeaders.length === 0) {
+        this.logger.warn(`⚠️ No hay cabeceras indexadas para Excel ${excelId}`);
+        return;
+      }
+
+      const indexedHeaders = metadata.indexedHeaders;
+      this.logger.log(`🔧 Creando ${indexedHeaders.length} índices reales para Excel ${excelId}...`);
+
+      // Crear un índice para cada columna seleccionada
+      for (const column of indexedHeaders) {
+        const indexName = `idx_excel_${excelId}_${column.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+        
+        try {
+          // Crear índice parcial para este Excel y esta columna específica
+          // Usamos LOWER para búsquedas case-insensitive
+          await this.dataSource.query(`
+            CREATE INDEX IF NOT EXISTS "${indexName}" 
+            ON dynamic_records ((LOWER("rowData" ->> '${column}')))
+            WHERE excel_id = ${excelId};
+          `);
+          
+          this.logger.log(`  ✅ Índice creado: ${indexName}`);
+        } catch (indexError) {
+          this.logger.warn(`  ⚠️ Error creando índice ${indexName}: ${indexError.message}`);
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      this.logger.log(`⚡ ${indexedHeaders.length} índices creados en ${duration}ms para Excel ${excelId}`);
+      
+    } catch (error) {
+      this.logger.error(`❌ Error creando índices para Excel ${excelId}: ${error.message}`);
+    }
+  }
+
+  // Eliminar índices cuando se elimina un Excel
+  async dropIndexesForExcel(excelId: number): Promise<void> {
+    try {
+      // Buscar y eliminar todos los índices de este Excel
+      const result = await this.dataSource.query(`
+        SELECT indexname FROM pg_indexes 
+        WHERE tablename = 'dynamic_records' 
+        AND indexname LIKE 'idx_excel_${excelId}_%';
+      `);
+
+      for (const row of result) {
+        await this.dataSource.query(`DROP INDEX IF EXISTS "${row.indexname}";`);
+        this.logger.log(`🗑️ Índice eliminado: ${row.indexname}`);
+      }
+    } catch (error) {
+      this.logger.warn(`⚠️ Error eliminando índices: ${error.message}`);
+    }
   }
 }

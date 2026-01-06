@@ -27,6 +27,8 @@ export class ExcelController {
 
   @Get('metadata')
   async getAllExcelMetadata(@GetUser() user: UserEntity): Promise<ExcelMetadataEntity[]> {
+    // Limpiar automáticamente excels vacíos (subidas incompletas)
+    await this.service.cleanupEmptyExcels(user.id);
     return this.service.getAllExcelMetadata(user.id);
   }
 
@@ -53,16 +55,46 @@ export class ExcelController {
   ): Promise<{ success: boolean }> {
     console.log(`📡 [notify-progress] Excel ${body.excelId} - ${body.status} - ${body.progress?.toFixed(1)}% - ${body.message || ''}`);
     
-    this.service.notifyProgressViaWebSocket(
-      body.userId,
-      body.excelId,
-      body.progress,
-      body.total,
-      body.processed,
-      body.status,
-      body.filename,
-      body.message,
-    );
+    // Si Go terminó de insertar, crear índices REALES para las columnas seleccionadas
+    if (body.status === 'completed') {
+      // Notificar que está indexando
+      this.service.notifyProgressViaWebSocket(
+        body.userId,
+        body.excelId,
+        98,
+        body.total,
+        body.processed,
+        'indexing',
+        body.filename,
+        '🔧 Creando índices para búsqueda rápida...',
+      );
+      
+      // Crear índices reales en PostgreSQL
+      await this.service.createRealIndexesForExcel(body.excelId, body.userId);
+      
+      // Notificar completado con índices
+      this.service.notifyProgressViaWebSocket(
+        body.userId,
+        body.excelId,
+        100,
+        body.total,
+        body.processed,
+        'completed',
+        body.filename,
+        `✅ Completado: ${body.total?.toLocaleString()} registros con índices optimizados`,
+      );
+    } else {
+      this.service.notifyProgressViaWebSocket(
+        body.userId,
+        body.excelId,
+        body.progress,
+        body.total,
+        body.processed,
+        body.status,
+        body.filename,
+        body.message,
+      );
+    }
     return { success: true };
   }
 

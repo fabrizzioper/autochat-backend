@@ -1,8 +1,9 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { UserEntity } from '../users/user.entity';
 
 @Entity('dynamic_records')
+@Index(['userId', 'excelId']) // ⚡ Índice compuesto para búsquedas rápidas
 export class DynamicRecordEntity {
   @PrimaryGeneratedColumn()
   id: number;
