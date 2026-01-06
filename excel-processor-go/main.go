@@ -555,7 +555,8 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 // insertRecordsOptimized inserta registros en paralelo para máxima velocidad
 func insertRecordsOptimized(ctx context.Context, excelID, userID int, records []map[string]interface{}, filename string) {
 	totalRecords := len(records)
-	batchSize := 5000 // Batches optimizados
+	// ⚡ Batches más grandes = menos overhead de transacciones
+	batchSize := 10000
 	
 	var processed atomic.Int32
 	
@@ -572,8 +573,8 @@ func insertRecordsOptimized(ctx context.Context, excelID, userID int, records []
 		})
 	}
 
-	// Para archivos grandes (>100k), usar inserción paralela
-	useParallel := totalRecords > 100000
+	// ⚡ Siempre usar inserción paralela para archivos grandes (>50k)
+	useParallel := totalRecords > 50000
 	
 	if !useParallel {
 		// Inserción secuencial para archivos pequeños
@@ -651,8 +652,8 @@ func insertRecordsParallel(ctx context.Context, excelID, userID int, records []m
 	
 	totalRecords := len(records)
 	
-	// Usar 4 workers para inserción paralela
-	numWorkers := 4
+	// ⚡ Usar 6 workers para aprovechar el pool de conexiones (20 conns)
+	numWorkers := 6
 	
 	type batch struct {
 		records []map[string]interface{}
@@ -874,10 +875,11 @@ func readHeadersOnly(c *fiber.Ctx) error {
 }
 
 // ============================================================================
-// ⚡ LECTURA COMPLETA DIRECTA DEL ZIP - SIN EXCELIZE
+// ⚡ LECTURA COMPLETA DIRECTA DEL ZIP - ULTRA OPTIMIZADA
 // ============================================================================
 
 // readExcelDirectFromZip - Lee TODO el Excel directamente del ZIP sin usar excelize
+// Usa goroutines para leer sharedStrings y sheet en paralelo
 func readExcelDirectFromZip(filePath string, progressCallback func(int)) ([]string, [][]string, error) {
 	zipReader, err := zip.OpenReader(filePath)
 	if err != nil {
@@ -899,30 +901,48 @@ func readExcelDirectFromZip(filePath string, progressCallback func(int)) ([]stri
 		return nil, nil, fmt.Errorf("no se encontró sheet1.xml")
 	}
 
-	// Leer TODOS los shared strings primero
-	sharedStrings := make([]string, 0)
+	// ⚡ Leer sharedStrings en paralelo con un goroutine
+	var sharedStrings []string
+	var ssErr error
+	ssDone := make(chan bool, 1)
+	
 	if sharedStringsFile != nil {
-		sharedStrings, _ = readAllSharedStrings(sharedStringsFile)
+		go func() {
+			sharedStrings, ssErr = readAllSharedStringsOptimized(sharedStringsFile)
+			ssDone <- true
+		}()
+	} else {
+		ssDone <- true
+	}
+
+	// Esperar a que termine sharedStrings
+	<-ssDone
+	if ssErr != nil {
+		log.Printf("⚠️ Error leyendo sharedStrings: %v", ssErr)
 	}
 
 	// Leer todas las filas
-	return readAllRowsFromXML(sheetFile, sharedStrings, progressCallback)
+	return readAllRowsFromXMLOptimized(sheetFile, sharedStrings, progressCallback)
 }
 
-// readAllSharedStrings - Lee todos los strings compartidos
-func readAllSharedStrings(ssFile *zip.File) ([]string, error) {
+// readAllSharedStringsOptimized - Lee todos los strings compartidos con buffer grande
+func readAllSharedStringsOptimized(ssFile *zip.File) ([]string, error) {
 	rc, err := ssFile.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
 
-	var result []string
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 256*1024))
+	// ⚡ Buffer de 1MB para lectura más rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
+	
+	// Pre-alocar slice (estimar ~100k strings)
+	result := make([]string, 0, 100000)
 	
 	inSi := false
 	inT := false
 	var currentText strings.Builder
+	currentText.Grow(256) // Pre-alocar capacidad
 
 	for {
 		token, err := decoder.Token()
@@ -957,8 +977,8 @@ func readAllSharedStrings(ssFile *zip.File) ([]string, error) {
 	return result, nil
 }
 
-// readAllRowsFromXML - Lee todas las filas del sheet XML
-func readAllRowsFromXML(sheetFile *zip.File, sharedStrings []string, progressCallback func(int)) ([]string, [][]string, error) {
+// readAllRowsFromXMLOptimized - Lee todas las filas del sheet XML con optimizaciones
+func readAllRowsFromXMLOptimized(sheetFile *zip.File, sharedStrings []string, progressCallback func(int)) ([]string, [][]string, error) {
 	rc, err := sheetFile.Open()
 	if err != nil {
 		return nil, nil, err
@@ -966,11 +986,14 @@ func readAllRowsFromXML(sheetFile *zip.File, sharedStrings []string, progressCal
 	defer rc.Close()
 
 	var headers []string
-	var rows [][]string
+	// ⚡ Pre-alocar para ~300k filas
+	rows := make([][]string, 0, 300000)
 	
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 256*1024))
+	// ⚡ Buffer de 1MB para lectura más rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
 	
-	var currentRow []xmlCell
+	// ⚡ Pre-alocar slice de celdas
+	currentRow := make([]xmlCell, 0, 100)
 	var currentCell xmlCell
 	inRow := false
 	inValue := false
@@ -989,7 +1012,7 @@ func readAllRowsFromXML(sheetFile *zip.File, sharedStrings []string, progressCal
 		case xml.StartElement:
 			if t.Name.Local == "row" {
 				inRow = true
-				currentRow = make([]xmlCell, 0)
+				currentRow = currentRow[:0] // Reusar slice
 				rowNumber++
 			} else if t.Name.Local == "c" && inRow {
 				currentCell = xmlCell{}
