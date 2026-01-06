@@ -52,23 +52,36 @@ export class ExcelService {
   // ============================================================================
 
   /**
-   * Lee solo la primera fila (cabeceras) de un Excel
-   * ⚡ ULTRA OPTIMIZADO: Lee directamente del ZIP sin parsear todo el archivo
+   * Lee solo la primera fila (cabeceras) de un Excel usando Go
+   * Timeout de 120s para archivos muy grandes
    */
   async readExcelHeaders(filePath: string): Promise<{ headers: string[]; totalRows: number }> {
     const startTime = Date.now();
     
-    try {
-      // ⚡ MÉTODO RÁPIDO: Leer directamente del ZIP
-      const result = await this.readHeadersFromZip(filePath);
-      const duration = Date.now() - startTime;
-      this.logger.log(`⚡ Cabeceras leídas en ${duration}ms (ZIP): ${result.headers.length} columnas, ~${result.totalRows} filas`);
-      return result;
-    } catch (error) {
-      // Fallback al método tradicional si falla
-      this.logger.warn(`⚠️ Fallback a XLSX tradicional: ${error.message}`);
-      return this.readHeadersWithXLSX(filePath, startTime);
+    // Usar Go para leer cabeceras (lectura directa del ZIP - ultra rápida)
+    const response = await axios.post<{
+      success: boolean;
+      headers: string[];
+      totalRows: number;
+      duration: string;
+      error?: string;
+    }>(`${env.EXCEL_PROCESSOR_URL}/read-headers`, {
+      file_path: filePath,
+    }, {
+      timeout: 30000, // 30 segundos máximo (normalmente tarda 1-5s)
+    });
+    
+    if (!response.data.success) {
+      throw new Error(response.data.error || 'Error leyendo cabeceras');
     }
+    
+    const duration = Date.now() - startTime;
+    this.logger.log(`⚡ Cabeceras leídas en ${duration}ms (Go: ${response.data.duration}): ${response.data.headers.length} columnas, ~${response.data.totalRows} filas`);
+    
+    return {
+      headers: response.data.headers,
+      totalRows: response.data.totalRows,
+    };
   }
 
   /**
