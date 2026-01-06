@@ -23,8 +23,8 @@ FROM alpine:3.19
 
 WORKDIR /app
 
-# Instalar certificados SSL
-RUN apk --no-cache add ca-certificates tzdata
+# Instalar certificados SSL y wget para healthcheck
+RUN apk --no-cache add ca-certificates tzdata wget
 
 # Copiar binario desde builder
 COPY --from=builder /app/excel-processor .
