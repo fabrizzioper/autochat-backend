@@ -34,10 +34,12 @@ import (
 // ============================================================================
 
 var (
-	dbPool           *pgxpool.Pool
-	backendURL       string
-	activeProcesses  = make(map[int]*ProcessStatus)
-	activeProcessMux sync.RWMutex
+	dbPool             *pgxpool.Pool
+	backendURL         string
+	activeProcesses    = make(map[int]*ProcessStatus)
+	activeProcessMux   sync.RWMutex
+	cancelledProcesses = make(map[int]bool) // Procesos marcados como cancelados
+	cancelledMux       sync.RWMutex
 )
 
 type ProcessStatus struct {
@@ -70,6 +72,27 @@ func deleteActiveProcess(userID int) {
 	activeProcessMux.Lock()
 	defer activeProcessMux.Unlock()
 	delete(activeProcesses, userID)
+}
+
+// Marcar proceso como cancelado
+func setCancelledProcess(excelID int) {
+	cancelledMux.Lock()
+	defer cancelledMux.Unlock()
+	cancelledProcesses[excelID] = true
+}
+
+// Verificar si proceso está cancelado
+func isProcessCancelled(excelID int) bool {
+	cancelledMux.RLock()
+	defer cancelledMux.RUnlock()
+	return cancelledProcesses[excelID]
+}
+
+// Limpiar estado de cancelación
+func clearCancelledProcess(excelID int) {
+	cancelledMux.Lock()
+	defer cancelledMux.Unlock()
+	delete(cancelledProcesses, excelID)
 }
 
 // ============================================================================
@@ -783,6 +806,39 @@ func getActiveProcessEndpoint(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"hasActiveProcess": false})
 }
 
+// ============================================================================
+// CANCELAR PROCESO
+// ============================================================================
+
+func cancelProcessEndpoint(c *fiber.Ctx) error {
+	excelIDStr := c.Params("excel_id")
+	excelID, err := strconv.Atoi(excelIDStr)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "excel_id inválido"})
+	}
+
+	log.Printf("🔴 Cancelando proceso para Excel %d", excelID)
+
+	// Marcar el proceso como cancelado
+	setCancelledProcess(excelID)
+
+	// Buscar y eliminar el proceso activo para cualquier usuario
+	activeProcessMux.Lock()
+	for userID, status := range activeProcesses {
+		if status.ExcelID == excelID {
+			log.Printf("🗑️ Eliminando proceso activo de usuario %d para Excel %d", userID, excelID)
+			delete(activeProcesses, userID)
+			break
+		}
+	}
+	activeProcessMux.Unlock()
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": fmt.Sprintf("Proceso %d marcado como cancelado", excelID),
+	})
+}
+
 func healthCheck(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"status":  "healthy",
@@ -1492,6 +1548,7 @@ func main() {
 	app.Post("/process", processExcel)
 	app.Post("/process-from-path", processFromPath)  // Procesar desde path local
 	app.Get("/active-process/:user_id", getActiveProcessEndpoint)
+	app.Delete("/cancel/:excel_id", cancelProcessEndpoint) // Cancelar proceso
 
 	// Iniciar servidor
 	port := os.Getenv("EXCEL_PROCESSOR_PORT")

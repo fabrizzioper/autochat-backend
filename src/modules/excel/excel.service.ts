@@ -441,11 +441,19 @@ export class ExcelService implements OnModuleInit {
     try {
       this.logger.log(`▶️ Continuando procesamiento de Excel ${excelId} con ${selectedHeaders.length} cabeceras a indexar`);
       
-      // 1. Guardar las cabeceras indexadas en la metadata
-      await this.metadataRepo.update(excelId, {
-        indexedHeaders: selectedHeaders,
-      });
-      this.logger.log(`💾 Cabeceras indexadas guardadas: ${selectedHeaders.join(', ')}`);
+      // 1. Guardar las cabeceras indexadas en la metadata (usando save para asegurar persistencia)
+      const metadata = await this.metadataRepo.findOne({ where: { id: excelId } });
+      if (!metadata) {
+        return { success: false, message: 'Excel no encontrado en la base de datos' };
+      }
+      
+      metadata.indexedHeaders = selectedHeaders;
+      await this.metadataRepo.save(metadata);
+      this.logger.log(`💾 Cabeceras indexadas guardadas en Excel ${excelId}: ${selectedHeaders.join(', ')}`);
+      
+      // Verificar que se guardó correctamente
+      const verification = await this.metadataRepo.findOne({ where: { id: excelId } });
+      this.logger.log(`✅ Verificación: indexedHeaders = ${JSON.stringify(verification?.indexedHeaders)}`);
       
       // 2. ⚡ Enviar solo el PATH al Go processor (no el archivo completo)
       // Go leerá el archivo directamente desde el path
@@ -478,7 +486,17 @@ export class ExcelService implements OnModuleInit {
    * Cancelar upload pendiente (cuando el usuario recarga sin seleccionar)
    */
   async cancelPendingUpload(excelId: number, userId: number): Promise<{ success: boolean; message: string }> {
+    this.logger.log(`🔴 Cancelando proceso para Excel ${excelId}, usuario ${userId}`);
+    
     const pending = this.pendingUploads.get(excelId);
+    
+    // Intentar cancelar en Go (por si ya empezó a procesar)
+    try {
+      await axios.delete(`${env.EXCEL_PROCESSOR_URL}/cancel/${excelId}`);
+      this.logger.log(`✅ Proceso cancelado en Go para Excel ${excelId}`);
+    } catch {
+      // Ignorar si no hay proceso activo en Go
+    }
     
     if (!pending) {
       // Verificar si existe el metadata y eliminarlo
@@ -652,17 +670,46 @@ export class ExcelService implements OnModuleInit {
   }
   
   // Limpiar excels con 0 registros (subidas incompletas)
+  // ⚠️ NO eliminar excels que están pendientes o siendo procesados
   async cleanupEmptyExcels(userId: number): Promise<number> {
     const emptyExcels = await this.metadataRepo.find({
       where: { userId, totalRecords: 0 },
     });
     
-    if (emptyExcels.length > 0) {
-      await this.metadataRepo.remove(emptyExcels);
-      this.logger.log(`🗑️ Limpiados ${emptyExcels.length} excels vacíos para usuario ${userId}`);
+    if (emptyExcels.length === 0) {
+      return 0;
     }
     
-    return emptyExcels.length;
+    // Filtrar: NO eliminar excels que están pendientes en NestJS
+    const pendingExcelIds = new Set<number>();
+    for (const [excelId, pending] of this.pendingUploads) {
+      if (pending.userId === userId) {
+        pendingExcelIds.add(excelId);
+      }
+    }
+    
+    // Filtrar: NO eliminar excels que están siendo procesados por Go
+    let activeInGo = new Set<number>();
+    try {
+      const goResponse = await axios.get(`${env.EXCEL_PROCESSOR_URL}/active-process/${userId}`, { timeout: 2000 });
+      if (goResponse.data.hasActiveProcess && goResponse.data.excelId) {
+        activeInGo.add(goResponse.data.excelId);
+      }
+    } catch {
+      // Ignorar errores de conexión a Go
+    }
+    
+    // Solo eliminar los que NO están pendientes NI procesándose
+    const toDelete = emptyExcels.filter(excel => 
+      !pendingExcelIds.has(excel.id) && !activeInGo.has(excel.id)
+    );
+    
+    if (toDelete.length > 0) {
+      await this.metadataRepo.remove(toDelete);
+      this.logger.log(`🗑️ Limpiados ${toDelete.length} excels vacíos para usuario ${userId} (${emptyExcels.length - toDelete.length} omitidos por estar activos)`);
+    }
+    
+    return toDelete.length;
   }
 
   // Obtener registros dinámicos para Excel
@@ -921,16 +968,31 @@ export class ExcelService implements OnModuleInit {
     const startTime = Date.now();
     
     try {
-      // Obtener las cabeceras indexadas de la metadata
-      const metadata = await this.metadataRepo.findOne({ where: { id: excelId, userId } });
+      this.logger.log(`🔧 Buscando metadata para Excel ${excelId}, userId ${userId}...`);
       
-      if (!metadata || !metadata.indexedHeaders || metadata.indexedHeaders.length === 0) {
-        this.logger.warn(`⚠️ No hay cabeceras indexadas para Excel ${excelId}`);
+      // Obtener las cabeceras indexadas de la metadata (sin filtrar por userId ya que viene de Go)
+      let metadata = await this.metadataRepo.findOne({ where: { id: excelId, userId } });
+      
+      // Si no encuentra con userId, intentar solo con id (por si el userId de Go no coincide)
+      if (!metadata) {
+        this.logger.warn(`⚠️ No encontrado con userId ${userId}, buscando solo por id...`);
+        metadata = await this.metadataRepo.findOne({ where: { id: excelId } });
+      }
+      
+      if (!metadata) {
+        this.logger.error(`❌ No existe metadata para Excel ${excelId}`);
+        return;
+      }
+      
+      this.logger.log(`📋 Metadata encontrada: id=${metadata.id}, indexedHeaders=${JSON.stringify(metadata.indexedHeaders)}`);
+      
+      if (!metadata.indexedHeaders || metadata.indexedHeaders.length === 0) {
+        this.logger.warn(`⚠️ No hay cabeceras indexadas para Excel ${excelId} (indexedHeaders es null o vacío)`);
         return;
       }
 
       const indexedHeaders = metadata.indexedHeaders;
-      this.logger.log(`🔧 Creando ${indexedHeaders.length} índices reales para Excel ${excelId}...`);
+      this.logger.log(`🔧 Creando ${indexedHeaders.length} índices reales para Excel ${excelId}: ${indexedHeaders.join(', ')}`);
 
       // Crear un índice para cada columna seleccionada
       for (const column of indexedHeaders) {
@@ -946,7 +1008,7 @@ export class ExcelService implements OnModuleInit {
           `);
           
           this.logger.log(`  ✅ Índice creado: ${indexName}`);
-        } catch (indexError) {
+        } catch (indexError: any) {
           this.logger.warn(`  ⚠️ Error creando índice ${indexName}: ${indexError.message}`);
         }
       }
@@ -958,7 +1020,7 @@ export class ExcelService implements OnModuleInit {
       const duration = Date.now() - startTime;
       this.logger.log(`⚡ ${indexedHeaders.length} índices creados en ${duration}ms para Excel ${excelId}`);
       
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`❌ Error creando índices para Excel ${excelId}: ${error.message}`);
     }
   }
