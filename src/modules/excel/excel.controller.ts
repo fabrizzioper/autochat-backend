@@ -74,9 +74,8 @@ export class ExcelController {
   }))
   async uploadExcel(
     @GetUser() user: UserEntity,
-    @Req() req: any,
     @UploadedFile() file: { originalname: string; buffer: Buffer },
-  ): Promise<{ success: boolean; message: string; recordsCount?: number; excelId?: number }> {
+  ): Promise<{ success: boolean; message: string; excelId?: number; headers?: string[]; totalRows?: number }> {
     if (!file) {
       throw new BadRequestException('No se proporcionó ningún archivo');
     }
@@ -87,43 +86,75 @@ export class ExcelController {
       throw new BadRequestException('El archivo debe ser un Excel (.xlsx o .xls)');
     }
 
-    const authHeader = req.headers.authorization;
-    const jwtToken = authHeader?.replace('Bearer ', '') || '';
-
-    const tempPath = path.join(process.cwd(), 'temp', `${Date.now()}-${file.originalname}`);
+    // Guardar archivo temporalmente
+    const tempPath = path.join(process.cwd(), 'temp', `${Date.now()}-${user.id}-${file.originalname}`);
     
     try {
       await fs.mkdir(path.join(process.cwd(), 'temp'), { recursive: true });
       await fs.writeFile(tempPath, file.buffer);
 
-      const result = await this.service.processExcelFile(
+      // NUEVO FLUJO: Solo leer cabeceras, esperar selección
+      const result = await this.service.uploadAndReadHeaders(
         tempPath,
         file.originalname,
         user.email || 'Usuario',
         user.id,
-        jwtToken,
       );
 
-      await fs.unlink(tempPath);
-
       if (!result.success) {
+        // Limpiar archivo temporal
+        try { await fs.unlink(tempPath); } catch {}
         throw new BadRequestException(result.message);
       }
 
+      // NO eliminamos tempPath aquí - lo necesitamos para continuar después
       return {
         success: true,
         message: result.message,
-        recordsCount: result.recordsCount,
         excelId: result.excelId,
+        headers: result.headers,
+        totalRows: result.totalRows,
       };
-    } catch (error) {
-      try {
-        await fs.unlink(tempPath);
-      } catch {
-        // Ignorar
-      }
+    } catch (error: any) {
+      try { await fs.unlink(tempPath); } catch {}
       throw error;
     }
+  }
+
+  // NUEVO: Continuar procesamiento después de seleccionar cabeceras
+  @Post(':excelId/continue-processing')
+  async continueProcessing(
+    @GetUser() user: UserEntity,
+    @Req() req: any,
+    @Param('excelId', ParseIntPipe) excelId: number,
+    @Body('selectedHeaders') selectedHeaders: string[],
+  ): Promise<{ success: boolean; message: string }> {
+    if (!selectedHeaders || selectedHeaders.length === 0) {
+      throw new BadRequestException('Debes seleccionar al menos una cabecera');
+    }
+
+    const authHeader = req.headers.authorization;
+    const jwtToken = authHeader?.replace('Bearer ', '') || '';
+
+    return this.service.continueProcessingWithHeaders(excelId, user.id, selectedHeaders, jwtToken);
+  }
+
+  // NUEVO: Cancelar upload pendiente
+  @Delete(':excelId/cancel-pending')
+  async cancelPending(
+    @GetUser() user: UserEntity,
+    @Param('excelId', ParseIntPipe) excelId: number,
+  ): Promise<{ success: boolean; message: string }> {
+    return this.service.cancelPendingUpload(excelId, user.id);
+  }
+
+  // Obtener cabeceras indexadas (las que se seleccionaron al subir)
+  @Get(':excelId/indexed-headers')
+  async getIndexedHeaders(
+    @GetUser() user: UserEntity,
+    @Param('excelId', ParseIntPipe) excelId: number,
+  ): Promise<{ id: number; headerName: string; indexedAt: string }[]> {
+    return this.service.getIndexedHeaders(excelId, user.id);
   }
 
   // ==========================================

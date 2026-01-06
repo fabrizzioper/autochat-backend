@@ -26,6 +26,9 @@ export class ExcelMetadataEntity {
   @Column({ type: 'json', nullable: true })
   headers: string[] | null;
 
+  @Column({ type: 'json', nullable: true, name: 'indexed_headers' })
+  indexedHeaders: string[] | null; // Cabeceras seleccionadas para búsqueda rápida
+
   @Column({ default: true })
   isReactive: boolean;
 

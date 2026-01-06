@@ -122,6 +122,7 @@ func processExcel(c *fiber.Ctx) error {
 	// Obtener parámetros
 	userIDStr := c.FormValue("user_id")
 	uploadedBy := c.FormValue("uploaded_by")
+	existingExcelID := c.FormValue("excel_id") // ⚡ Excel ID existente (de NestJS)
 
 	userID, err := strconv.Atoi(userIDStr)
 	if err != nil {
@@ -139,25 +140,37 @@ func processExcel(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "El archivo debe ser Excel (.xlsx o .xls)"})
 	}
 
-	log.Printf("📊 Procesando archivo: %s para usuario %d", filename, userID)
+	// ⚡ MODO DIRECTO: Si viene de NestJS (con excel_id), procesar directamente sin pausar
+	skipHeaderSelection := existingExcelID != ""
 
-	// PASO 1: Crear metadata inicial
+	log.Printf("📊 Procesando archivo: %s para usuario %d (modo directo: %v)", filename, userID, skipHeaderSelection)
+
+	// PASO 1: Obtener o crear metadata
 	ctx := context.Background()
 	var excelID int
-	err = dbPool.QueryRow(ctx, `
-		INSERT INTO excel_metadata (user_id, filename, "totalRecords", "uploadedBy", headers, "isReactive", "uploadedAt")
-		VALUES ($1, $2, 0, $3, '[]'::json, true, NOW())
-		RETURNING id
-	`, userID, filename, uploadedBy).Scan(&excelID)
+	
+	if existingExcelID != "" {
+		excelID, err = strconv.Atoi(existingExcelID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "excel_id inválido"})
+		}
+		log.Printf("♻️ Usando Excel ID existente: %d (cabeceras ya seleccionadas en NestJS)", excelID)
+	} else {
+		// Crear metadata nueva (modo legacy - sin NestJS)
+		err = dbPool.QueryRow(ctx, `
+			INSERT INTO excel_metadata (user_id, filename, "totalRecords", "uploadedBy", headers, "isReactive", "uploadedAt")
+			VALUES ($1, $2, 0, $3, '[]'::json, true, NOW())
+			RETURNING id
+		`, userID, filename, uploadedBy).Scan(&excelID)
 
-	if err != nil {
-		log.Printf("❌ Error creando metadata: %v", err)
-		return c.Status(500).JSON(fiber.Map{"error": "Error creando metadata"})
+		if err != nil {
+			log.Printf("❌ Error creando metadata: %v", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Error creando metadata"})
+		}
+		log.Printf("💾 Metadata creada (ID: %d)", excelID)
 	}
 
-	log.Printf("💾 Metadata creada (ID: %d)", excelID)
-
-	// PASO 2: Notificar INMEDIATAMENTE que empezó
+	// PASO 2: Notificar inicio
 	status := &ProcessStatus{
 		ExcelID:  excelID,
 		Filename: filename,
@@ -182,13 +195,13 @@ func processExcel(c *fiber.Ctx) error {
 	fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
 	log.Printf("📏 Archivo guardado: %.2f MB", fileSizeMB)
 
-	// Notificar que el archivo fue guardado
 	status.Status = "saved"
 	status.Message = fmt.Sprintf("Archivo guardado (%.1f MB)", fileSizeMB)
 	notifyProgress(excelID, userID, status)
 
 	// PASO 4: Procesar en background
-	go processExcelInBackground(excelID, userID, filename, uploadedBy, tempPath, fileSizeMB)
+	// ⚡ Pasar flag para indicar si debe saltar la selección de cabeceras
+	go processExcelInBackgroundDirect(excelID, userID, filename, uploadedBy, tempPath, fileSizeMB, skipHeaderSelection)
 
 	// PASO 5: Responder inmediatamente
 	log.Printf("✅ Excel %d: Respondiendo inmediatamente, procesando en background", excelID)
@@ -198,6 +211,126 @@ func processExcel(c *fiber.Ctx) error {
 		"excelId":      excelID,
 		"recordsCount": 0,
 	})
+}
+
+// ⚡ NUEVO: Procesamiento directo sin pausar para cabeceras
+func processExcelInBackgroundDirect(excelID, userID int, filename, uploadedBy, tempPath string, fileSizeMB float64, skipHeaderSelection bool) {
+	startTime := time.Now()
+	defer os.Remove(tempPath)
+
+	// Helper para notificar
+	notify := func(status, message string, progress float64, total, processed int) {
+		notifyProgress(excelID, userID, &ProcessStatus{
+			ExcelID:   excelID,
+			Filename:  filename,
+			Status:    status,
+			Message:   message,
+			Progress:  progress,
+			Total:     total,
+			Processed: processed,
+		})
+	}
+
+	notify("reading", fmt.Sprintf("Abriendo Excel (%.1f MB)...", fileSizeMB), 0, 0, 0)
+
+	// Abrir Excel
+	f, err := excelize.OpenFile(tempPath, excelize.Options{
+		UnzipSizeLimit:    10 << 30,
+		UnzipXMLSizeLimit: 10 << 30,
+		RawCellValue:      false,
+		ShortDatePattern:  "yyyy-mm-dd",
+	})
+	if err != nil {
+		log.Printf("❌ Error abriendo Excel: %v", err)
+		notify("error", "Error abriendo Excel: "+err.Error(), 0, 0, 0)
+		deleteActiveProcess(userID)
+		return
+	}
+	defer f.Close()
+
+	sheets := f.GetSheetList()
+	if len(sheets) == 0 {
+		notify("error", "El Excel no tiene hojas", 0, 0, 0)
+		deleteActiveProcess(userID)
+		return
+	}
+	sheetName := sheets[0]
+
+	notify("reading", "Leyendo datos del Excel...", 5, 0, 0)
+
+	// Leer todas las filas
+	rows, err := f.GetRows(sheetName, excelize.Options{RawCellValue: false})
+	if err != nil {
+		log.Printf("❌ Error leyendo filas: %v", err)
+		notify("error", "Error leyendo filas", 0, 0, 0)
+		deleteActiveProcess(userID)
+		return
+	}
+
+	if len(rows) < 2 {
+		notify("error", "El Excel no contiene datos", 0, 0, 0)
+		deleteActiveProcess(userID)
+		return
+	}
+
+	readTime := time.Since(startTime)
+	totalRows := len(rows) - 1
+	log.Printf("📋 Excel leído en %.2fs: %d filas", readTime.Seconds(), len(rows))
+
+	notify("processing", fmt.Sprintf("Excel leído: %d filas en %.1fs", totalRows, readTime.Seconds()), 10, totalRows, 0)
+
+	// Procesar headers
+	headers := make([]string, len(rows[0]))
+	seen := make(map[string]int)
+	for i, col := range rows[0] {
+		header := strings.TrimSpace(col)
+		if header == "" {
+			header = fmt.Sprintf("Columna_%d", i+1)
+		}
+		if count, exists := seen[header]; exists {
+			seen[header] = count + 1
+			header = fmt.Sprintf("%s_%d", header, count+1)
+		} else {
+			seen[header] = 1
+		}
+		headers[i] = header
+	}
+
+	log.Printf("📊 Headers: %d columnas", len(headers))
+
+	// Convertir filas a registros
+	records := processRowsParallel(rows[1:], headers)
+
+	log.Printf("📊 Registros válidos: %d", len(records))
+
+	if len(records) == 0 {
+		notify("error", "El Excel no contiene datos válidos", 0, 0, 0)
+		deleteActiveProcess(userID)
+		return
+	}
+
+	// Actualizar metadata
+	headersJSON, _ := json.Marshal(headers)
+	ctx := context.Background()
+	dbPool.Exec(ctx, `
+		UPDATE excel_metadata 
+		SET "totalRecords" = $1, headers = $2::json
+		WHERE id = $3
+	`, len(records), string(headersJSON), excelID)
+
+	notify("inserting", fmt.Sprintf("Insertando %d registros...", len(records)), 15, len(records), 0)
+
+	// Insertar registros
+	insertRecordsOptimized(ctx, excelID, userID, records, filename)
+
+	// Completado
+	elapsed := time.Since(startTime)
+	log.Printf("✅ Excel %d completado: %d registros en %.2fs", excelID, len(records), elapsed.Seconds())
+	notify("completed", fmt.Sprintf("✅ Completado: %d registros en %.1fs", len(records), elapsed.Seconds()), 100, len(records), len(records))
+
+	// Limpiar
+	time.Sleep(3 * time.Second)
+	deleteActiveProcess(userID)
 }
 
 func processExcelInBackground(excelID, userID int, filename, uploadedBy, tempPath string, fileSizeMB float64) {
@@ -674,6 +807,47 @@ func healthCheck(c *fiber.Ctx) error {
 	})
 }
 
+// ⚡ NUEVO: Procesar desde un path local (sin transferir archivo por HTTP)
+// NestJS ya guardó el archivo, solo nos pasa el path
+type ProcessFromPathRequest struct {
+	ExcelID         int      `json:"excel_id"`
+	UserID          int      `json:"user_id"`
+	Filename        string   `json:"filename"`
+	UploadedBy      string   `json:"uploaded_by"`
+	TempPath        string   `json:"temp_path"`
+	SelectedHeaders []string `json:"selected_headers"`
+}
+
+func processFromPath(c *fiber.Ctx) error {
+	var req ProcessFromPathRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "JSON inválido: " + err.Error()})
+	}
+
+	if req.ExcelID == 0 || req.UserID == 0 || req.TempPath == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Faltan parámetros requeridos"})
+	}
+
+	// Verificar que el archivo existe
+	fileInfo, err := os.Stat(req.TempPath)
+	if err != nil {
+		log.Printf("❌ Archivo no encontrado: %s - %v", req.TempPath, err)
+		return c.Status(400).JSON(fiber.Map{"error": "Archivo no encontrado"})
+	}
+
+	fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
+	log.Printf("📊 Procesando desde path: %s (%.1f MB) - Excel %d", req.TempPath, fileSizeMB, req.ExcelID)
+
+	// Procesar en background
+	go processExcelInBackgroundDirect(req.ExcelID, req.UserID, req.Filename, req.UploadedBy, req.TempPath, fileSizeMB, true)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Procesamiento iniciado desde path local",
+		"excelId": req.ExcelID,
+	})
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -758,6 +932,7 @@ func main() {
 	// Rutas
 	app.Get("/health", healthCheck)
 	app.Post("/process", processExcel)
+	app.Post("/process-from-path", processFromPath) // ⚡ NUEVO: Procesar desde path local
 	app.Get("/active-process/:user_id", getActiveProcessEndpoint)
 
 	// Iniciar servidor
