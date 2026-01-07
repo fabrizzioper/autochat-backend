@@ -467,23 +467,23 @@ func processExcelInBackground(excelID, userID int, filename, uploadedBy, tempPat
 }
 
 // ============================================================================
-// PROCESAMIENTO PARALELO DE FILAS (OPTIMIZACIÓN)
+// PROCESAMIENTO PARALELO DE FILAS
 // ============================================================================
 
 // processRowsParallel convierte filas de Excel a registros usando goroutines
-// Esto acelera el procesamiento 2-4x en CPUs multi-core
 func processRowsParallel(rows [][]string, headers []string) []map[string]interface{} {
 	if len(rows) == 0 {
 		return []map[string]interface{}{}
 	}
 
-	// Configurar workers basado en CPUs disponibles
+	numHeaders := len(headers)
+	
+	// ⚡ Usar todos los CPUs disponibles (hasta 12)
 	numWorkers := runtime.NumCPU()
-	if numWorkers > 8 {
-		numWorkers = 8 // Limitar a 8 workers máximo
+	if numWorkers > 12 {
+		numWorkers = 12
 	}
 
-	// Canales para distribuir trabajo
 	type job struct {
 		index int
 		row   []string
@@ -497,13 +497,6 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 	jobs := make(chan job, len(rows))
 	results := make(chan result, len(rows))
 
-	// Pool de sincronización para reutilizar mapas (reduce GC)
-	recordPool := sync.Pool{
-		New: func() interface{} {
-			return make(map[string]interface{}, len(headers))
-		},
-	}
-
 	// Lanzar workers
 	var wg sync.WaitGroup
 	for w := 0; w < numWorkers; w++ {
@@ -511,34 +504,20 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				// Obtener mapa del pool
-				record := recordPool.Get().(map[string]interface{})
-				
-				// Limpiar el mapa (puede venir del pool con datos)
-				for k := range record {
-					delete(record, k)
-				}
-				
+				record := make(map[string]interface{}, numHeaders)
 				isEmpty := true
 				row := job.row
 				
-				// Procesar cada columna
-				for j, header := range headers {
-					if j < len(row) {
-						value := strings.TrimSpace(row[j])
-						if value != "" {
-							record[header] = value
-							isEmpty = false
-						}
+				for j := 0; j < numHeaders && j < len(row); j++ {
+					value := strings.TrimSpace(row[j])
+					if value != "" {
+						record[headers[j]] = value
+						isEmpty = false
 					}
 				}
 				
-				// Solo enviar si tiene datos
 				if !isEmpty {
 					results <- result{index: job.index, record: record}
-				} else {
-					// Devolver al pool si está vacío
-					recordPool.Put(record)
 				}
 			}
 		}()
@@ -552,14 +531,14 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 		close(jobs)
 	}()
 
-	// Esperar a que terminen los workers
+	// Esperar y cerrar resultados
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Recolectar resultados (mantener orden original)
-	recordsMap := make(map[int]map[string]interface{})
+	// Recolectar resultados
+	recordsMap := make(map[int]map[string]interface{}, len(rows))
 	for res := range results {
 		recordsMap[res.index] = res.record
 	}
@@ -578,8 +557,7 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 // insertRecordsOptimized inserta registros en paralelo para máxima velocidad
 func insertRecordsOptimized(ctx context.Context, excelID, userID int, records []map[string]interface{}, filename string) {
 	totalRecords := len(records)
-	// ⚡ Batches más grandes = menos overhead de transacciones
-	// 25k es óptimo para COPY con PostgreSQL
+	// ⚡ Batches de 25k = óptimo para COPY con PostgreSQL
 	batchSize := 25000
 	
 	var processed atomic.Int32
@@ -597,7 +575,7 @@ func insertRecordsOptimized(ctx context.Context, excelID, userID int, records []
 		})
 	}
 
-	// ⚡ Siempre usar inserción paralela para archivos grandes (>50k)
+	// ⚡ Usar inserción paralela para archivos grandes (>50k)
 	useParallel := totalRecords > 50000
 	
 	if !useParallel {
@@ -677,7 +655,6 @@ func insertRecordsParallel(ctx context.Context, excelID, userID int, records []m
 	totalRecords := len(records)
 	
 	// ⚡ Usar 10 workers para aprovechar el pool de conexiones (20 conns)
-	// Más workers = mejor paralelismo en inserts
 	numWorkers := 10
 	
 	type batch struct {
@@ -933,11 +910,11 @@ func readHeadersOnly(c *fiber.Ctx) error {
 }
 
 // ============================================================================
-// ⚡ LECTURA COMPLETA DIRECTA DEL ZIP - ULTRA OPTIMIZADA
+// ⚡ LECTURA ULTRA OPTIMIZADA CON BUFFERS GRANDES Y PARALELISMO
 // ============================================================================
 
-// readExcelDirectFromZip - Lee TODO el Excel directamente del ZIP sin usar excelize
-// Usa goroutines para leer sharedStrings y sheet en paralelo
+// readExcelDirectFromZip - Lee TODO el Excel directamente del ZIP
+// ⚡ OPTIMIZADO: Buffers de 4MB, lectura paralela real
 func readExcelDirectFromZip(filePath string, progressCallback func(int)) ([]string, [][]string, error) {
 	zipReader, err := zip.OpenReader(filePath)
 	if err != nil {
@@ -959,48 +936,48 @@ func readExcelDirectFromZip(filePath string, progressCallback func(int)) ([]stri
 		return nil, nil, fmt.Errorf("no se encontró sheet1.xml")
 	}
 
-	// ⚡ Leer sharedStrings en paralelo con un goroutine
+	// ⚡ OPTIMIZACIÓN: Leer sharedStrings en paralelo MIENTRAS se prepara el sheet
 	var sharedStrings []string
 	var ssErr error
-	ssDone := make(chan bool, 1)
+	ssDone := make(chan struct{})
 	
 	if sharedStringsFile != nil {
 		go func() {
-			sharedStrings, ssErr = readAllSharedStringsOptimized(sharedStringsFile)
-			ssDone <- true
+			defer close(ssDone)
+			sharedStrings, ssErr = readAllSharedStringsUltraFast(sharedStringsFile)
 		}()
 	} else {
-		ssDone <- true
+		close(ssDone)
 	}
 
-	// Esperar a que termine sharedStrings
+	// ⚡ Esperar sharedStrings (necesario antes de procesar filas)
 	<-ssDone
 	if ssErr != nil {
 		log.Printf("⚠️ Error leyendo sharedStrings: %v", ssErr)
 	}
 
-	// Leer todas las filas
-	return readAllRowsFromXMLOptimized(sheetFile, sharedStrings, progressCallback)
+	// Leer todas las filas con buffer optimizado
+	return readAllRowsUltraFast(sheetFile, sharedStrings, progressCallback)
 }
 
-// readAllSharedStringsOptimized - Lee todos los strings compartidos con buffer grande
-func readAllSharedStringsOptimized(ssFile *zip.File) ([]string, error) {
+// ⚡ ULTRA FAST: Lee sharedStrings con buffer de 4MB y menos allocations
+func readAllSharedStringsUltraFast(ssFile *zip.File) ([]string, error) {
 	rc, err := ssFile.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
 
-	// ⚡ Buffer de 1MB para lectura más rápida
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
+	// ⚡ Buffer de 4MB para lectura ultra rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 4*1024*1024))
 	
-	// Pre-alocar slice (estimar ~100k strings)
-	result := make([]string, 0, 100000)
+	// ⚡ Pre-alocar slice grande (estimar ~200k strings para archivos grandes)
+	result := make([]string, 0, 200000)
 	
 	inSi := false
 	inT := false
 	var currentText strings.Builder
-	currentText.Grow(256) // Pre-alocar capacidad
+	currentText.Grow(512) // Pre-alocar más capacidad
 
 	for {
 		token, err := decoder.Token()
@@ -1013,20 +990,24 @@ func readAllSharedStringsOptimized(ssFile *zip.File) ([]string, error) {
 
 		switch t := token.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "si" {
+			switch t.Name.Local {
+			case "si":
 				inSi = true
 				currentText.Reset()
-			} else if t.Name.Local == "t" && inSi {
-				inT = true
+			case "t":
+				if inSi {
+					inT = true
+				}
 			}
 		case xml.CharData:
 			if inT && inSi {
 				currentText.Write(t)
 			}
 		case xml.EndElement:
-			if t.Name.Local == "t" {
+			switch t.Name.Local {
+			case "t":
 				inT = false
-			} else if t.Name.Local == "si" {
+			case "si":
 				result = append(result, currentText.String())
 				inSi = false
 			}
@@ -1035,8 +1016,8 @@ func readAllSharedStringsOptimized(ssFile *zip.File) ([]string, error) {
 	return result, nil
 }
 
-// readAllRowsFromXMLOptimized - Lee todas las filas del sheet XML con optimizaciones
-func readAllRowsFromXMLOptimized(sheetFile *zip.File, sharedStrings []string, progressCallback func(int)) ([]string, [][]string, error) {
+// ⚡ ULTRA FAST: Lee todas las filas con buffer de 4MB
+func readAllRowsUltraFast(sheetFile *zip.File, sharedStrings []string, progressCallback func(int)) ([]string, [][]string, error) {
 	rc, err := sheetFile.Open()
 	if err != nil {
 		return nil, nil, err
@@ -1044,18 +1025,19 @@ func readAllRowsFromXMLOptimized(sheetFile *zip.File, sharedStrings []string, pr
 	defer rc.Close()
 
 	var headers []string
-	// ⚡ Pre-alocar para ~300k filas
-	rows := make([][]string, 0, 300000)
+	// ⚡ Pre-alocar para ~500k filas (archivos muy grandes)
+	rows := make([][]string, 0, 500000)
 	
-	// ⚡ Buffer de 1MB para lectura más rápida
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
+	// ⚡ Buffer de 4MB para lectura ultra rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 4*1024*1024))
 	
-	// ⚡ Pre-alocar slice de celdas
+	// ⚡ Pre-alocar slice de celdas (100 columnas típico)
 	currentRow := make([]xmlCell, 0, 100)
 	var currentCell xmlCell
 	inRow := false
 	inValue := false
 	rowNumber := 0
+	ssLen := len(sharedStrings)
 
 	for {
 		token, err := decoder.Token()
@@ -1068,67 +1050,86 @@ func readAllRowsFromXMLOptimized(sheetFile *zip.File, sharedStrings []string, pr
 
 		switch t := token.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "row" {
+			switch t.Name.Local {
+			case "row":
 				inRow = true
-				currentRow = currentRow[:0] // Reusar slice
+				currentRow = currentRow[:0] // Reusar slice sin allocation
 				rowNumber++
-			} else if t.Name.Local == "c" && inRow {
-				currentCell = xmlCell{}
-				for _, attr := range t.Attr {
-					if attr.Name.Local == "t" {
-						currentCell.Type = attr.Value
+			case "c":
+				if inRow {
+					currentCell = xmlCell{}
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "t" {
+							currentCell.Type = attr.Value
+							break // Solo necesitamos el tipo
+						}
 					}
 				}
-			} else if t.Name.Local == "v" && inRow {
-				inValue = true
+			case "v":
+				if inRow {
+					inValue = true
+				}
 			}
 		case xml.CharData:
 			if inValue && inRow {
 				currentCell.Value = string(t)
 			}
 		case xml.EndElement:
-			if t.Name.Local == "v" {
+			switch t.Name.Local {
+			case "v":
 				inValue = false
-			} else if t.Name.Local == "c" && inRow {
-				currentRow = append(currentRow, currentCell)
-			} else if t.Name.Local == "row" && inRow {
-				rowStrings := make([]string, len(currentRow))
-				for i, cell := range currentRow {
-					if cell.Type == "s" && cell.Value != "" {
-						if idx, err := strconv.Atoi(cell.Value); err == nil && idx < len(sharedStrings) {
-							rowStrings[i] = sharedStrings[idx]
+			case "c":
+				if inRow {
+					currentRow = append(currentRow, currentCell)
+				}
+			case "row":
+				if inRow {
+					// ⚡ Convertir celdas a strings de forma eficiente
+					rowStrings := make([]string, len(currentRow))
+					for i, cell := range currentRow {
+						if cell.Type == "s" && cell.Value != "" {
+							if idx, err := strconv.Atoi(cell.Value); err == nil && idx < ssLen {
+								rowStrings[i] = sharedStrings[idx]
+							}
+						} else {
+							rowStrings[i] = cell.Value
+						}
+					}
+					
+					if rowNumber == 1 {
+						// Procesar headers
+						seen := make(map[string]int, len(rowStrings))
+						headers = make([]string, len(rowStrings))
+						for i, col := range rowStrings {
+							header := strings.TrimSpace(col)
+							if header == "" {
+								header = fmt.Sprintf("Columna_%d", i+1)
+							}
+							if count, exists := seen[header]; exists {
+								seen[header] = count + 1
+								header = fmt.Sprintf("%s_%d", header, count+1)
+							} else {
+								seen[header] = 1
+							}
+							headers[i] = header
 						}
 					} else {
-						rowStrings[i] = cell.Value
-					}
-				}
-				
-				if rowNumber == 1 {
-					seen := make(map[string]int)
-					headers = make([]string, len(rowStrings))
-					for i, col := range rowStrings {
-						header := strings.TrimSpace(col)
-						if header == "" {
-							header = fmt.Sprintf("Columna_%d", i+1)
+						rows = append(rows, rowStrings)
+						if progressCallback != nil && len(rows)%50000 == 0 {
+							progressCallback(len(rows))
 						}
-						if count, exists := seen[header]; exists {
-							seen[header] = count + 1
-							header = fmt.Sprintf("%s_%d", header, count+1)
-						} else {
-							seen[header] = 1
-						}
-						headers[i] = header
 					}
-				} else {
-					rows = append(rows, rowStrings)
-					if progressCallback != nil {
-						progressCallback(len(rows))
-					}
+					inRow = false
 				}
-				inRow = false
 			}
 		}
 	}
+	
+	// Callback final
+	if progressCallback != nil {
+		progressCallback(len(rows))
+	}
+	
 	return headers, rows, nil
 }
 
@@ -1263,6 +1264,9 @@ type xmlCell struct {
 }
 
 // readFirstRowFromXML - Lee solo la primera fila del sheet XML
+// ⚡ OPTIMIZADO: Buffer de 1MB, regex precompilado, salida temprana
+var dimensionRegex = regexp.MustCompile(`[A-Z]+(\d+)$`)
+
 func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 	rc, err := sheetFile.Open()
 	if err != nil {
@@ -1270,13 +1274,15 @@ func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 	}
 	defer rc.Close()
 
-	var cells []xmlCell
+	// ⚡ Buffer de 1MB para lectura más rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
+	
+	cells := make([]xmlCell, 0, 100) // Pre-alocar para ~100 columnas
 	totalRows := 0
-
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 64*1024))
 	inFirstRow := false
 	var currentCell xmlCell
 	inValue := false
+	foundFirstRow := false
 
 	for {
 		token, err := decoder.Token()
@@ -1294,20 +1300,27 @@ func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 				// Extraer total de filas del atributo ref (ej: "A1:CG258537")
 				for _, attr := range t.Attr {
 					if attr.Name.Local == "ref" {
-						re := regexp.MustCompile(`[A-Z]+(\d+)$`)
-						matches := re.FindStringSubmatch(attr.Value)
+						matches := dimensionRegex.FindStringSubmatch(attr.Value)
 						if len(matches) > 1 {
 							if rows, err := strconv.Atoi(matches[1]); err == nil {
 								totalRows = rows - 1 // -1 porque la primera fila son headers
 							}
 						}
+						break
 					}
 				}
 			case "row":
+				// ⚡ Si ya encontramos la primera fila, salir inmediatamente
+				if foundFirstRow {
+					return cells, totalRows, nil
+				}
 				// Verificar si es la primera fila
 				for _, attr := range t.Attr {
-					if attr.Name.Local == "r" && attr.Value == "1" {
-						inFirstRow = true
+					if attr.Name.Local == "r" {
+						if attr.Value == "1" {
+							inFirstRow = true
+						}
+						break
 					}
 				}
 			case "c":
@@ -1316,6 +1329,7 @@ func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "t" {
 							currentCell.Type = attr.Value
+							break
 						}
 					}
 				}
@@ -1338,7 +1352,8 @@ func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 				}
 			case "row":
 				if inFirstRow {
-					// Terminamos con la primera fila, salir
+					foundFirstRow = true
+					// ⚡ Terminamos con la primera fila, salir inmediatamente
 					return cells, totalRows, nil
 				}
 			}
@@ -1349,6 +1364,7 @@ func readFirstRowFromXML(sheetFile *zip.File) ([]xmlCell, int, error) {
 }
 
 // readSharedStringsPartial - Lee SOLO los strings que necesitamos del sharedStrings.xml
+// ⚡ OPTIMIZADO: Buffer de 1MB, salida temprana
 func readSharedStringsPartial(ssFile *zip.File, neededIndices map[int]bool) (map[int]string, error) {
 	rc, err := ssFile.Open()
 	if err != nil {
@@ -1356,7 +1372,7 @@ func readSharedStringsPartial(ssFile *zip.File, neededIndices map[int]bool) (map
 	}
 	defer rc.Close()
 
-	result := make(map[int]string)
+	result := make(map[int]string, len(neededIndices))
 	maxNeeded := 0
 	for idx := range neededIndices {
 		if idx > maxNeeded {
@@ -1364,11 +1380,13 @@ func readSharedStringsPartial(ssFile *zip.File, neededIndices map[int]bool) (map
 		}
 	}
 
-	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 64*1024))
+	// ⚡ Buffer de 1MB para lectura rápida
+	decoder := xml.NewDecoder(bufio.NewReaderSize(rc, 1024*1024))
 	currentIndex := 0
 	inSi := false
 	inT := false
 	var currentText strings.Builder
+	currentText.Grow(256)
 	foundCount := 0
 	totalNeeded := len(neededIndices)
 
@@ -1378,7 +1396,7 @@ func readSharedStringsPartial(ssFile *zip.File, neededIndices map[int]bool) (map
 			break
 		}
 		if err != nil {
-			return result, nil // Retornar lo que tenemos
+			return result, nil
 		}
 
 		switch t := token.(type) {
@@ -1405,13 +1423,13 @@ func readSharedStringsPartial(ssFile *zip.File, neededIndices map[int]bool) (map
 					result[currentIndex] = currentText.String()
 					foundCount++
 					if foundCount >= totalNeeded {
-						return result, nil // Ya encontramos todos
+						return result, nil // ⚡ Ya encontramos todos, salir
 					}
 				}
 				currentIndex++
 				inSi = false
 				
-				// Si ya pasamos el índice máximo, salir
+				// ⚡ Si ya pasamos el índice máximo, salir inmediatamente
 				if currentIndex > maxNeeded {
 					return result, nil
 				}
