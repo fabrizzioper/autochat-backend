@@ -10,6 +10,7 @@ import * as fsSync from 'fs';
 import * as XLSX from 'xlsx';
 import axios from 'axios';
 import { WhatsAppGateway } from '../whatsapp/whatsapp.gateway';
+import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import * as unzipper from 'unzipper';
 import * as sax from 'sax';
 
@@ -45,6 +46,8 @@ export class ExcelService implements OnModuleInit {
     private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
     @Inject(forwardRef(() => WhatsAppGateway))
     private readonly gateway: WhatsAppGateway,
+    @Inject(forwardRef(() => WhatsAppService))
+    private readonly whatsappService: WhatsAppService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -349,12 +352,14 @@ export class ExcelService implements OnModuleInit {
 
   /**
    * FASE 1: Subir Excel, leer cabeceras, esperar selección
+   * @param fromWhatsApp - Si es true, la selección de cabeceras se hará por WhatsApp (no mostrar modal en frontend)
    */
   async uploadAndReadHeaders(
     filePath: string,
     filename: string,
     uploadedBy: string,
     userId: number,
+    fromWhatsApp: boolean = false,
   ): Promise<{ success: boolean; excelId: number; headers: string[]; totalRows: number; message: string }> {
     try {
       this.logger.log(`📊 Leyendo cabeceras de: ${filename}`);
@@ -393,6 +398,7 @@ export class ExcelService implements OnModuleInit {
       this.logger.log(`⏸️ Excel ${savedMetadata.id}: Esperando selección de cabeceras (${headers.length} columnas, ~${totalRows} filas)`);
       
       // 4. Notificar al frontend que las cabeceras están listas
+      // Si viene de WhatsApp, el frontend NO debe mostrar el modal de selección
       if (this.gateway) {
         this.gateway.emitExcelProgressToUser(userId, {
           excelId: savedMetadata.id,
@@ -403,6 +409,7 @@ export class ExcelService implements OnModuleInit {
           filename,
           message: `Selecciona las cabeceras a indexar (${headers.length} disponibles)`,
           headers, // Enviar cabeceras en el evento
+          fromWhatsApp, // Si es true, el frontend NO mostrará el modal
         });
       }
 
@@ -838,6 +845,51 @@ export class ExcelService implements OnModuleInit {
           message,
         });
       }
+    }
+  }
+
+  /**
+   * Notificar al remitente por WhatsApp cuando el Excel termine de procesarse
+   */
+  async notifyExcelCompletedViaWhatsApp(
+    excelId: number,
+    userId: number,
+    totalRecords: number,
+  ): Promise<void> {
+    try {
+      // Obtener metadata del Excel para saber a quién notificar
+      const metadata = await this.metadataRepo.findOne({
+        where: { id: excelId, userId },
+      });
+
+      if (!metadata) {
+        this.logger.warn(`⚠️ No se encontró metadata para Excel ${excelId}`);
+        return;
+      }
+
+      const uploadedBy = metadata.uploadedBy;
+      if (!uploadedBy) {
+        this.logger.warn(`⚠️ Excel ${excelId} no tiene uploadedBy registrado`);
+        return;
+      }
+
+      const indexedHeaders = metadata.indexedHeaders || [];
+      const columnsText = indexedHeaders.length > 0 
+        ? indexedHeaders.join(', ') 
+        : 'todas las columnas';
+
+      const message = 
+        `✅ *Excel procesado exitosamente*\n\n` +
+        `📁 Archivo: ${metadata.filename}\n` +
+        `📊 Registros: ${totalRecords.toLocaleString()}\n` +
+        `🔍 Columnas indexadas: ${columnsText}\n\n` +
+        `_Ya puedes realizar búsquedas enviando mensajes con el formato:_\n` +
+        `*columna: valor*`;
+
+      await this.whatsappService.sendNotification(userId, uploadedBy, message);
+      this.logger.log(`📱 Notificación de Excel completado enviada a ${uploadedBy}`);
+    } catch (error) {
+      this.logger.error(`❌ Error notificando por WhatsApp: ${error.message}`);
     }
   }
 

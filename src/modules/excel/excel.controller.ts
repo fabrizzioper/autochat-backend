@@ -72,7 +72,7 @@ export class ExcelController {
       // Crear índices reales en PostgreSQL
       await this.service.createRealIndexesForExcel(body.excelId, body.userId);
       
-      // Notificar completado con índices
+      // Notificar completado con índices (WebSocket al frontend)
       this.service.notifyProgressViaWebSocket(
         body.userId,
         body.excelId,
@@ -83,6 +83,9 @@ export class ExcelController {
         body.filename,
         `✅ Completado: ${body.total?.toLocaleString()} registros con índices optimizados`,
       );
+
+      // Notificar por WhatsApp al remitente
+      await this.service.notifyExcelCompletedViaWhatsApp(body.excelId, body.userId, body.total);
     } else {
       this.service.notifyProgressViaWebSocket(
         body.userId,

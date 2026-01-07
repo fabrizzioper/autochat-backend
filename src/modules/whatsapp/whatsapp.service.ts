@@ -339,27 +339,42 @@ export class WhatsAppService {
           return;
         }
       }
-      // Si NO hay nombre configurado, procesar cualquier Excel
-      // (flujo normal sin filtro)
 
-      // Procesar Excel (siempre dinámico ahora) - usar userId de la sesión
-      const result = await this.excelService.processExcelFile(tempPath, filename, senderNumber, userId);
+      // NUEVO FLUJO: Primero leer cabeceras y esperar selección del usuario
+      // fromWhatsApp=true indica que la selección se hará por WhatsApp, no por el frontend
+      const uploadResult = await this.excelService.uploadAndReadHeaders(
+        tempPath,
+        filename,
+        senderNumber,
+        userId,
+        true, // fromWhatsApp: el frontend NO debe mostrar modal de selección
+      );
 
-      // Eliminar archivo temporal
-      await fs.unlink(tempPath);
-
-      // Responder (LOG 4 se genera en sendMessage)
-      await this.sendMessage(userId, senderNumber, result.message);
-
-      // Notificar al frontend a través de WebSocket (al usuario de la sesión)
-      if (this.gateway && result.success) {
-        this.gateway.emitExcelUploadedToUser(userId, {
-          filename,
-          recordsCount: result.recordsCount,
-        });
+      if (!uploadResult.success) {
+        await fs.unlink(tempPath).catch(() => {});
+        await this.sendMessage(userId, senderNumber, uploadResult.message);
+        return;
       }
 
-      this.logger.log(`✅ Excel procesado: ${result.recordsCount} registros`);
+      // Construir mensaje con cabeceras enumeradas
+      const headers = uploadResult.headers || [];
+      let headersList = '📊 *Excel recibido correctamente*\n\n';
+      headersList += `📁 Archivo: ${filename}\n`;
+      headersList += `📝 Filas: ~${uploadResult.totalRows?.toLocaleString() || 'N/A'}\n\n`;
+      headersList += '*Columnas disponibles:*\n';
+      
+      headers.forEach((header, index) => {
+        headersList += `${index + 1}. ${header}\n`;
+      });
+      
+      headersList += '\n📌 *Responde con los números de las columnas que deseas indexar para búsqueda rápida*\n';
+      headersList += 'Ejemplo: 1, 3, 5\n\n';
+      headersList += '_O escribe "cancelar" para cancelar el proceso_';
+
+      await this.sendMessage(userId, senderNumber, headersList);
+      this.logger.log(`📋 Cabeceras enviadas a ${senderNumber}, esperando selección de columnas`);
+
+      // El frontend será notificado automáticamente a través del sistema de progreso
     } catch (error) {
       this.logger.error(`❌ Error procesando Excel: ${error.message}`);
       await this.sendMessage(userId, senderNumber, `Error al procesar el Excel: ${error.message}`);
@@ -374,6 +389,65 @@ export class WhatsAppService {
       
       if (!text) return;
 
+      // PASO 1: Verificar si hay un Excel pendiente esperando selección de columnas
+      const pendingUpload = this.excelService.getPendingUploadForUser(userId);
+      
+      if (pendingUpload) {
+        // Verificar si el mensaje es para cancelar
+        if (text.toLowerCase() === 'cancelar') {
+          await this.excelService.cancelPendingUpload(pendingUpload.excelId, userId);
+          await this.sendMessage(userId, senderNumber, '❌ Proceso cancelado. El Excel ha sido eliminado.');
+          this.logger.log(`🚫 Usuario ${userId} canceló el proceso del Excel ${pendingUpload.excelId}`);
+          return;
+        }
+
+        // Verificar si el mensaje contiene números (selección de columnas)
+        const numbersOnly = text.replace(/[,\s]+/g, ' ').trim();
+        const numbers = numbersOnly.split(' ')
+          .map(n => parseInt(n, 10))
+          .filter(n => !isNaN(n) && n > 0);
+
+        if (numbers.length > 0) {
+          // Validar que los números estén en rango
+          const maxColumn = pendingUpload.headers.length;
+          const invalidNumbers = numbers.filter(n => n > maxColumn);
+          
+          if (invalidNumbers.length > 0) {
+            await this.sendMessage(
+              userId, 
+              senderNumber, 
+              `⚠️ Los números ${invalidNumbers.join(', ')} están fuera de rango. Solo hay ${maxColumn} columnas.\n\nIntenta de nuevo con números del 1 al ${maxColumn}.`
+            );
+            return;
+          }
+
+          // Convertir números a nombres de columnas
+          const selectedHeaders = numbers.map(n => pendingUpload.headers[n - 1]);
+          
+          this.logger.log(`📌 Columnas seleccionadas para indexar: ${selectedHeaders.join(', ')}`);
+          
+          // Continuar procesamiento con las columnas seleccionadas
+          const result = await this.excelService.continueProcessingWithHeaders(
+            pendingUpload.excelId,
+            userId,
+            selectedHeaders,
+          );
+
+          if (result.success) {
+            await this.sendMessage(
+              userId, 
+              senderNumber, 
+              `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingUpload.filename}\n🔍 Columnas indexadas: ${selectedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`
+            );
+          } else {
+            await this.sendMessage(userId, senderNumber, `❌ Error: ${result.message}`);
+          }
+          return;
+        }
+      }
+
+      // PASO 2: Si no hay upload pendiente o no son números, procesar como búsqueda normal
+      
       // Intentar parsear el mensaje en formato "keyword: valor" o "keyword valor"
       const colonMatch = text.match(/^(\S+)\s*:\s*(.+)$/i);
       const spaceMatch = text.match(/^(\S+)\s+(.+)$/);
@@ -390,7 +464,16 @@ export class WhatsAppService {
       }
       
       if (!keyword || !searchValue) {
-        this.logger.log(`Mensaje no tiene formato de búsqueda válido: ${text}`);
+        // Si hay un upload pendiente, recordar al usuario que seleccione columnas
+        if (pendingUpload) {
+          await this.sendMessage(
+            userId, 
+            senderNumber, 
+            `📌 Tienes un Excel pendiente de indexar.\n\nResponde con los números de las columnas a indexar (ej: 1, 3, 5)\nO escribe "cancelar" para cancelar el proceso.`
+          );
+        } else {
+          this.logger.log(`Mensaje no tiene formato de búsqueda válido: ${text}`);
+        }
         return;
       }
 
@@ -451,6 +534,19 @@ export class WhatsAppService {
 
     const jid = `${phoneNumber}@s.whatsapp.net`;
     await session.socket.sendMessage(jid, { text: message });
+  }
+
+  /**
+   * Método público para enviar notificaciones de WhatsApp (usado por ExcelService)
+   */
+  async sendNotification(userId: number, phoneNumber: string, message: string): Promise<boolean> {
+    try {
+      await this.sendMessage(userId, phoneNumber, message);
+      return true;
+    } catch (error) {
+      this.logger.error(`❌ Error enviando notificación a ${phoneNumber}: ${error.message}`);
+      return false;
+    }
   }
 
   async getQRCode(userId: number): Promise<QRCodeData> {
