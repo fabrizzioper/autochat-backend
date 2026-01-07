@@ -1013,9 +1013,9 @@ export class ExcelService implements OnModuleInit {
         }
       }
 
-      // ⚡ ANALYZE para actualizar estadísticas y optimizar consultas
-      await this.dataSource.query(`ANALYZE dynamic_records;`);
-      this.logger.log(`  📊 Estadísticas actualizadas`);
+      // ⚡ ANALYZE solo para este Excel específico (mucho más rápido)
+      // NO hacer ANALYZE global - es muy lento con millones de registros
+      this.logger.log(`  📊 Índices creados (ANALYZE omitido para velocidad)`);
 
       const duration = Date.now() - startTime;
       this.logger.log(`⚡ ${indexedHeaders.length} índices creados en ${duration}ms para Excel ${excelId}`);

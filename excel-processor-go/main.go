@@ -579,7 +579,8 @@ func processRowsParallel(rows [][]string, headers []string) []map[string]interfa
 func insertRecordsOptimized(ctx context.Context, excelID, userID int, records []map[string]interface{}, filename string) {
 	totalRecords := len(records)
 	// ⚡ Batches más grandes = menos overhead de transacciones
-	batchSize := 10000
+	// 25k es óptimo para COPY con PostgreSQL
+	batchSize := 25000
 	
 	var processed atomic.Int32
 	
@@ -613,7 +614,7 @@ func insertRecordsSequential(ctx context.Context, excelID, userID int, records [
 	filename string, processed *atomic.Int32, notify func(float64, int)) {
 	
 	totalRecords := len(records)
-	batchSize := 5000
+	batchSize := 10000 // Aumentado de 5k a 10k para menos overhead
 	rowIndex := 0
 	lastNotified := 0
 
@@ -675,8 +676,9 @@ func insertRecordsParallel(ctx context.Context, excelID, userID int, records []m
 	
 	totalRecords := len(records)
 	
-	// ⚡ Usar 6 workers para aprovechar el pool de conexiones (20 conns)
-	numWorkers := 6
+	// ⚡ Usar 10 workers para aprovechar el pool de conexiones (20 conns)
+	// Más workers = mejor paralelismo en inserts
+	numWorkers := 10
 	
 	type batch struct {
 		records []map[string]interface{}
