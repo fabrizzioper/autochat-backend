@@ -267,8 +267,8 @@ export class WhatsAppService {
           continue;
         }
         
-        // Verificar si es número autorizado y obtener userId
-        const msgUserId = await this.configService.getUserIdByPhoneNumber(senderNumber);
+        // Verificar si es número autorizado (pasando el userId de la sesión para considerar allowAll)
+        const msgUserId = await this.configService.getUserIdByPhoneNumber(senderNumber, userId);
         if (!msgUserId) {
           this.logger.log(`Mensaje de número no autorizado: ${senderNumber}`);
           continue;

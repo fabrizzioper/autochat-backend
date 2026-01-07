@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Delete, Body, Param, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
-import { ConfigService } from './config.service';
+import { ConfigService, AuthorizationMode } from './config.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from '../auth/decorators/get-user.decorator';
 import { UserEntity } from '../users/user.entity';
@@ -16,6 +16,10 @@ interface SetAllowAllDto {
   allow: boolean;
 }
 
+interface SetAuthorizationModeDto {
+  mode: AuthorizationMode;
+}
+
 interface SetReactiveFilenameDto {
   filename: string;
 }
@@ -26,7 +30,8 @@ interface AuthorizedNumberResponse {
 
 interface AuthorizedNumbersResponse {
   phoneNumbers: string[];
-  allowAll: boolean;
+  mode: AuthorizationMode;
+  allowAll: boolean; // mantener para compatibilidad
 }
 
 interface ReactiveFilenameResponse {
@@ -43,8 +48,8 @@ export class ConfigController {
   async getAuthorizedNumbers(@GetUser() user: UserEntity): Promise<AuthorizedNumbersResponse> {
     console.log('GET /config/authorized-numbers llamado para usuario:', user.id);
     const phoneNumbers = await this.service.getAuthorizedNumbersList(user.id);
-    const allowAll = await this.service.isAllowAllNumbers(user.id);
-    return { phoneNumbers, allowAll };
+    const mode = await this.service.getAuthorizationMode(user.id);
+    return { phoneNumbers, mode, allowAll: mode === 'all' };
   }
 
   @Get('authorized-number')
@@ -73,14 +78,32 @@ export class ConfigController {
     return { message: 'Números autorizados agregados exitosamente' };
   }
 
+  @Post('authorization-mode')
+  @HttpCode(HttpStatus.OK)
+  async setAuthorizationMode(
+    @GetUser() user: UserEntity,
+    @Body() dto: SetAuthorizationModeDto,
+  ): Promise<{ message: string }> {
+    await this.service.setAuthorizationMode(user.id, dto.mode);
+    const messages = {
+      all: 'Todos los números están permitidos',
+      list: 'Solo números de la lista están permitidos',
+      none: 'No se permite ningún número',
+    };
+    return { message: messages[dto.mode] };
+  }
+
+  // Mantener para compatibilidad con código viejo
   @Post('allow-all-numbers')
   @HttpCode(HttpStatus.OK)
   async setAllowAllNumbers(
     @GetUser() user: UserEntity,
     @Body() dto: SetAllowAllDto,
   ): Promise<{ message: string }> {
-    await this.service.setAllowAllNumbers(user.id, dto.allow);
-    return { message: dto.allow ? 'Todos los números están permitidos' : 'Modo permitir todos desactivado' };
+    // Convertir el viejo allow a nuevo modo
+    const mode: AuthorizationMode = dto.allow ? 'all' : 'list';
+    await this.service.setAuthorizationMode(user.id, mode);
+    return { message: dto.allow ? 'Todos los números están permitidos' : 'Solo números de la lista están permitidos' };
   }
 
   @Delete('authorized-number')
