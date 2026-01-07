@@ -75,6 +75,8 @@ services:
       DB_NAME: autochat_db
       EXCEL_PROCESSOR_PORT: 8001
       BACKEND_URL: http://backend:3000
+    volumes:
+      - ./temp:/app/temp
     depends_on:
       postgres:
         condition: service_healthy
