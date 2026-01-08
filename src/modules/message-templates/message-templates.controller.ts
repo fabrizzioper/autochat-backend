@@ -6,7 +6,8 @@ import { GetUser } from '../auth/decorators/get-user.decorator';
 import { UserEntity } from '../users/user.entity';
 
 interface CreateTemplateDto {
-  excelId: number;
+  excelId?: number;
+  formatId?: number; // Nuevo: asociar a formato en lugar de Excel
   name: string;
   keywords: string[]; // Múltiples palabras clave
   searchColumns: string[]; // Múltiples columnas de búsqueda
@@ -19,6 +20,7 @@ interface UpdateTemplateDto {
   searchColumns?: string[];
   template?: string;
   isActive?: boolean;
+  formatId?: number; // Nuevo: migrar a formato
 }
 
 @Controller('message-templates')
@@ -63,6 +65,30 @@ export class MessageTemplatesController {
     @Param('id', ParseIntPipe) id: number,
   ): Promise<void> {
     await this.service.delete(user.id, id);
+  }
+
+  /**
+   * Obtener templates asociados a un formato
+   */
+  @Get('by-format/:formatId')
+  async findByFormatId(
+    @GetUser() user: UserEntity,
+    @Param('formatId', ParseIntPipe) formatId: number,
+  ): Promise<MessageTemplateEntity[]> {
+    return this.service.findByFormatId(user.id, formatId);
+  }
+
+  /**
+   * Migrar templates de un Excel a un formato
+   */
+  @Post('migrate-to-format')
+  async migrateToFormat(
+    @GetUser() user: UserEntity,
+    @Body('excelId', ParseIntPipe) excelId: number,
+    @Body('formatId', ParseIntPipe) formatId: number,
+  ): Promise<{ success: boolean; count: number }> {
+    const count = await this.service.migrateTemplatesToFormat(user.id, excelId, formatId);
+    return { success: true, count };
   }
 }
 

@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { DynamicRecordEntity } from './dynamic-record.entity';
+import { ExcelFormatEntity } from './excel-format.entity';
 import { ExcelService } from './excel.service';
 import { ExcelController } from './excel.controller';
 import { AuthModule } from '../auth/auth.module';
@@ -9,7 +10,7 @@ import { WhatsAppModule } from '../whatsapp/whatsapp.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ExcelMetadataEntity, DynamicRecordEntity]),
+    TypeOrmModule.forFeature([ExcelMetadataEntity, DynamicRecordEntity, ExcelFormatEntity]),
     forwardRef(() => AuthModule),
     forwardRef(() => WhatsAppModule),
   ],

@@ -26,12 +26,25 @@ interface UserSession {
   connectionInfo: ConnectionInfo | null;
 }
 
+// Información de un Excel pendiente de guardar formato
+interface PendingFormatSave {
+  excelId: number;
+  filename: string;
+  headers: string[];
+  indexedHeaders: string[];
+  senderNumber: string;
+  createdAt: Date;
+}
+
 @Injectable()
 export class WhatsAppService {
   private readonly logger = new Logger(WhatsAppService.name);
   
   // Map para almacenar sesiones por userId
   private userSessions: Map<number, UserSession> = new Map();
+  
+  // Map para Excel pendientes de guardar formato (userId -> PendingFormatSave)
+  private pendingFormatSaves: Map<number, PendingFormatSave> = new Map();
 
   constructor(
     @Inject(forwardRef(() => ConfigService))
@@ -370,6 +383,23 @@ export class WhatsAppService {
         return;
       }
 
+      // Si hay un formato guardado y se está procesando automáticamente
+      if (uploadResult.autoProcessing && uploadResult.format) {
+        const formatName = uploadResult.format.name;
+        const indexedHeaders = uploadResult.format.indexedHeaders;
+        
+        const autoMessage = 
+          `📊 *Excel detectado con formato guardado*\n\n` +
+          `📁 Archivo: ${filename}\n` +
+          `💾 Formato: ${formatName}\n` +
+          `🔍 Columnas indexadas: ${indexedHeaders.join(', ')}\n\n` +
+          `_Procesando automáticamente... Recibirás una notificación cuando termine._`;
+        
+        await this.sendMessage(userId, senderNumber, autoMessage);
+        this.logger.log(`📋 Excel procesado automáticamente con formato "${formatName}"`);
+        return;
+      }
+
       // Construir mensaje con cabeceras enumeradas
       const headers = uploadResult.headers || [];
       let headersList = '📊 *Excel recibido correctamente*\n\n';
@@ -402,6 +432,55 @@ export class WhatsAppService {
       this.logger.log(`📝 Mensaje de texto recibido de ${senderNumber}: ${text.substring(0, 50)}...`);
       
       if (!text) return;
+
+      // PASO 0: Verificar si hay un formato pendiente de guardar
+      const pendingFormat = this.pendingFormatSaves.get(userId);
+      if (pendingFormat && pendingFormat.senderNumber === senderNumber) {
+        const lowerText = text.toLowerCase().trim();
+        
+        // Usuario responde "no" - no guardar
+        if (lowerText === 'no' || lowerText === 'no guardar') {
+          this.pendingFormatSaves.delete(userId);
+          await this.sendMessage(userId, senderNumber, '👍 Entendido, no se guardó el formato.');
+          this.logger.log(`📋 Usuario ${userId} decidió no guardar el formato`);
+          return;
+        }
+        
+        // Usuario responde "guardar" o "guardar [nombre]"
+        if (lowerText.startsWith('guardar')) {
+          const customName = text.slice(7).trim(); // Remover "guardar " del inicio
+          const formatName = customName || pendingFormat.filename.replace(/\.(xlsx|xls)$/i, '');
+          
+          // Guardar el formato
+          const savedFormat = await this.excelService.saveFormat(
+            userId,
+            formatName,
+            pendingFormat.filename,
+            pendingFormat.headers,
+            pendingFormat.indexedHeaders,
+            pendingFormat.excelId,
+          );
+          
+          this.pendingFormatSaves.delete(userId);
+          
+          const successMessage = 
+            `💾 *Formato guardado exitosamente*\n\n` +
+            `📋 Nombre: ${savedFormat.name}\n` +
+            `📁 Archivo: ${pendingFormat.filename}\n` +
+            `🔍 Columnas: ${pendingFormat.indexedHeaders.join(', ')}\n\n` +
+            `_La próxima vez que subas este archivo, se procesará automáticamente._`;
+          
+          await this.sendMessage(userId, senderNumber, successMessage);
+          this.logger.log(`💾 Formato "${savedFormat.name}" guardado por usuario ${userId}`);
+          return;
+        }
+        
+        // Si llegó aquí, el mensaje no es ni "guardar" ni "no", limpiar el pendiente después de 5 min
+        const ageMinutes = (Date.now() - pendingFormat.createdAt.getTime()) / 1000 / 60;
+        if (ageMinutes > 5) {
+          this.pendingFormatSaves.delete(userId);
+        }
+      }
 
       // PASO 1: Verificar si hay un Excel pendiente esperando selección de columnas
       const pendingUpload = this.excelService.getPendingUploadForUser(userId);
@@ -440,7 +519,7 @@ export class WhatsAppService {
           
           this.logger.log(`📌 Columnas seleccionadas para indexar: ${selectedHeaders.join(', ')}`);
           
-          // Continuar procesamiento con las columnas seleccionadas
+          // Continuar procesamiento con las columnas seleccionadas (sin guardar formato aún)
           const result = await this.excelService.continueProcessingWithHeaders(
             pendingUpload.excelId,
             userId,
@@ -448,11 +527,34 @@ export class WhatsAppService {
           );
 
           if (result.success) {
-            await this.sendMessage(
-              userId, 
-              senderNumber, 
-              `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingUpload.filename}\n🔍 Columnas indexadas: ${selectedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`
-            );
+            // Mensaje 1: Confirmación de procesamiento
+            const confirmMessage = `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingUpload.filename}\n🔍 Columnas indexadas: ${selectedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`;
+            await this.sendMessage(userId, senderNumber, confirmMessage);
+            
+            // Guardar estado pendiente para guardar formato
+            this.pendingFormatSaves.set(userId, {
+              excelId: pendingUpload.excelId,
+              filename: pendingUpload.filename,
+              headers: pendingUpload.headers,
+              indexedHeaders: selectedHeaders,
+              senderNumber,
+              createdAt: new Date(),
+            });
+            
+            // Mensaje 2 (separado): Preguntar si quiere guardar formato
+            setTimeout(async () => {
+              const formatQuestion = 
+                `💾 *¿Guardar configuración?*\n\n` +
+                `Si guardas este formato, la próxima vez que subas "${pendingUpload.filename}" se procesará automáticamente con las mismas columnas.\n\n` +
+                `📌 Responde:\n` +
+                `• *guardar* - Guardar con nombre automático\n` +
+                `• *guardar [nombre]* - Guardar con nombre personalizado\n` +
+                `• *no* - No guardar\n\n` +
+                `_Ej: guardar Inversiones MEF_`;
+              
+              await this.sendMessage(userId, senderNumber, formatQuestion);
+            }, 1500); // Esperar 1.5 segundos para que se vea como mensaje separado
+            
           } else {
             await this.sendMessage(userId, senderNumber, `❌ Error: ${result.message}`);
           }
@@ -637,11 +739,24 @@ export class WhatsAppService {
         ? template.searchColumns
         : [];
       
+      // Determinar qué Excel usar: directo del template o del formato asociado
+      let excelIdToUse: number | null = template.excelId;
+      if (!excelIdToUse && template.format && template.format.currentExcelId) {
+        excelIdToUse = template.format.currentExcelId;
+        this.logger.log(`📋 Usando Excel del formato "${template.format.name}": ${excelIdToUse}`);
+      }
+      
+      if (!excelIdToUse) {
+        this.logger.warn(`⚠️ Template "${template.name}" no tiene Excel asociado`);
+        await this.sendMessage(userId, senderNumber, `❌ El template "${template.name}" no tiene datos cargados. Sube el archivo Excel primero.`);
+        return;
+      }
+      
       this.logger.log(`📋 Template encontrado: "${template.name}" - Buscando en columnas: ${searchColumns.length > 0 ? searchColumns.join(', ') : 'ninguna'}`);
       
       const records = await this.excelService.searchDynamicRecords(
         userId,
-        template.excelId,
+        excelIdToUse,
         searchColumns,
         searchValue
       );

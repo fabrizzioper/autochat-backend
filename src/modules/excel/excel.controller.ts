@@ -1,7 +1,8 @@
-import { Controller, Get, Delete, Post, Param, Query, Body, Req, ParseIntPipe, UseGuards, UseInterceptors, UploadedFile, BadRequestException, SetMetadata } from '@nestjs/common';
+import { Controller, Get, Delete, Post, Put, Param, Query, Body, Req, ParseIntPipe, UseGuards, UseInterceptors, UploadedFile, BadRequestException, SetMetadata } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ExcelService } from './excel.service';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
+import { ExcelFormatEntity } from './excel-format.entity';
 import { DynamicRecordEntity } from './dynamic-record.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from '../auth/decorators/get-user.decorator';
@@ -110,7 +111,7 @@ export class ExcelController {
   async uploadExcel(
     @GetUser() user: UserEntity,
     @UploadedFile() file: { originalname: string; buffer: Buffer },
-  ): Promise<{ success: boolean; message: string; excelId?: number; headers?: string[]; totalRows?: number }> {
+  ): Promise<{ success: boolean; message: string; excelId?: number; headers?: string[]; totalRows?: number; autoProcessing?: boolean; hasFormat?: boolean }> {
     if (!file) {
       throw new BadRequestException('No se proporcionó ningún archivo');
     }
@@ -149,6 +150,8 @@ export class ExcelController {
         excelId: result.excelId,
         headers: result.headers,
         totalRows: result.totalRows,
+        autoProcessing: result.autoProcessing, // true si hay formato guardado
+        hasFormat: result.hasFormat,
       };
     } catch (error: any) {
       try { await fs.unlink(tempPath); } catch {}
@@ -163,7 +166,9 @@ export class ExcelController {
     @Req() req: any,
     @Param('excelId', ParseIntPipe) excelId: number,
     @Body('selectedHeaders') selectedHeaders: string[],
-  ): Promise<{ success: boolean; message: string }> {
+    @Body('saveFormat') saveFormat?: boolean,
+    @Body('formatName') formatName?: string,
+  ): Promise<{ success: boolean; message: string; formatId?: number }> {
     if (!selectedHeaders || selectedHeaders.length === 0) {
       throw new BadRequestException('Debes seleccionar al menos una cabecera');
     }
@@ -171,7 +176,14 @@ export class ExcelController {
     const authHeader = req.headers.authorization;
     const jwtToken = authHeader?.replace('Bearer ', '') || '';
 
-    return this.service.continueProcessingWithHeaders(excelId, user.id, selectedHeaders, jwtToken);
+    return this.service.continueProcessingWithHeaders(
+      excelId, 
+      user.id, 
+      selectedHeaders, 
+      jwtToken,
+      saveFormat || false,
+      formatName,
+    );
   }
 
   // NUEVO: Cancelar upload pendiente
@@ -226,7 +238,58 @@ export class ExcelController {
     await this.service.deleteExcel(user.id, excelId);
     return {
       success: true,
-      message: 'Excel eliminado correctamente',
+      message: 'Excel y formato eliminados correctamente',
+    };
+  }
+
+  // ============================================================================
+  // GESTIÓN DE FORMATOS DE EXCEL
+  // ============================================================================
+
+  /**
+   * Obtener todos los formatos guardados del usuario
+   */
+  @Get('formats/all')
+  async getAllFormats(
+    @GetUser() user: UserEntity,
+  ): Promise<ExcelFormatEntity[]> {
+    return this.service.getAllFormats(user.id);
+  }
+
+  /**
+   * Obtener un formato por ID
+   */
+  @Get('formats/:formatId')
+  async getFormatById(
+    @GetUser() user: UserEntity,
+    @Param('formatId', ParseIntPipe) formatId: number,
+  ): Promise<ExcelFormatEntity | null> {
+    return this.service.getFormatById(user.id, formatId);
+  }
+
+  /**
+   * Eliminar un formato
+   */
+  @Delete('formats/:formatId')
+  async deleteFormat(
+    @GetUser() user: UserEntity,
+    @Param('formatId', ParseIntPipe) formatId: number,
+  ): Promise<{ success: boolean; message: string }> {
+    return this.service.deleteFormat(user.id, formatId);
+  }
+
+  /**
+   * Verificar si existe un formato para un archivo
+   */
+  @Get('formats/check/:filename')
+  async checkFormat(
+    @GetUser() user: UserEntity,
+    @Param('filename') filename: string,
+  ): Promise<{ hasFormat: boolean; format?: ExcelFormatEntity }> {
+    const format = await this.service.findFormatForFile(user.id, filename);
+    return {
+      hasFormat: !!format,
+      format: format || undefined,
     };
   }
 }

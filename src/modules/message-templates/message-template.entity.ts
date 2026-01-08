@@ -1,6 +1,7 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { UserEntity } from '../users/user.entity';
 import { ExcelMetadataEntity } from '../excel/excel-metadata.entity';
+import { ExcelFormatEntity } from '../excel/excel-format.entity';
 
 @Entity('message_templates')
 export class MessageTemplateEntity {
@@ -14,12 +15,19 @@ export class MessageTemplateEntity {
   @JoinColumn({ name: 'user_id' })
   user: UserEntity;
 
-  @Column({ name: 'excel_id' })
-  excelId: number;
+  @Column({ name: 'excel_id', nullable: true })
+  excelId: number | null;
 
-  @ManyToOne(() => ExcelMetadataEntity, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ExcelMetadataEntity, { onDelete: 'SET NULL', nullable: true })
   @JoinColumn({ name: 'excel_id' })
-  excel: ExcelMetadataEntity;
+  excel: ExcelMetadataEntity | null;
+
+  @Column({ name: 'format_id', nullable: true })
+  formatId: number | null;
+
+  @ManyToOne(() => ExcelFormatEntity, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'format_id' })
+  format: ExcelFormatEntity | null;
 
   @Column()
   name: string;

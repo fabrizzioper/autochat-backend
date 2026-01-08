@@ -315,14 +315,13 @@
 			return
 		}
 
-		// Actualizar metadata
-		headersJSON, _ := json.Marshal(headers)
+		// Actualizar metadata (solo totalRecords, los headers ya fueron guardados por el backend de NestJS)
 		ctx := context.Background()
 		dbPool.Exec(ctx, `
 			UPDATE excel_metadata 
-			SET "totalRecords" = $1, headers = $2::json
-			WHERE id = $3
-		`, len(records), string(headersJSON), excelID)
+			SET "totalRecords" = $1
+			WHERE id = $2
+		`, len(records), excelID)
 
 		notify("inserting", fmt.Sprintf("Insertando %d registros...", len(records)), 15, len(records), 0)
 
@@ -441,14 +440,13 @@
 			return
 		}
 
-		// Actualizar metadata
-		headersJSON, _ := json.Marshal(headers)
+		// Actualizar metadata (solo totalRecords, los headers ya fueron guardados por el backend de NestJS)
 		ctx := context.Background()
 		dbPool.Exec(ctx, `
 			UPDATE excel_metadata 
-			SET "totalRecords" = $1, headers = $2::json
-			WHERE id = $3
-		`, len(records), string(headersJSON), excelID)
+			SET "totalRecords" = $1
+			WHERE id = $2
+		`, len(records), excelID)
 
 		// Notificar inicio de inserción
 		notify("inserting", fmt.Sprintf("Insertando %d registros...", len(records)), 15, len(records), 0)
@@ -1053,6 +1051,9 @@
 		var currentCell xmlCell
 		inRow := false
 		inValue := false
+		inInlineString := false  // Para <is> (inline string)
+		inInlineText := false    // Para <t> dentro de <is>
+		var inlineTextBuilder strings.Builder
 		rowNumber := 0
 		ssLen := len(sharedStrings)
 
@@ -1075,10 +1076,13 @@
 				case "c":
 					if inRow {
 						currentCell = xmlCell{}
+						inlineTextBuilder.Reset()
 						for _, attr := range t.Attr {
-							if attr.Name.Local == "t" {
+							switch attr.Name.Local {
+							case "t":
 								currentCell.Type = attr.Value
-								break // Solo necesitamos el tipo
+							case "r":
+								currentCell.Ref = attr.Value
 							}
 						}
 					}
@@ -1086,30 +1090,77 @@
 					if inRow {
 						inValue = true
 					}
+				case "is":
+					// Inline string - el valor está dentro de <is><t>...</t></is>
+					if inRow {
+						inInlineString = true
+					}
+				case "t":
+					// Elemento <t> puede estar dentro de <is> (inline string)
+					if inRow && inInlineString {
+						inInlineText = true
+					}
 				}
 			case xml.CharData:
-				if inValue && inRow {
-					currentCell.Value = string(t)
+				if inRow {
+					if inValue {
+						currentCell.Value = string(t)
+					} else if inInlineText {
+						// Acumular texto de inline string
+						inlineTextBuilder.Write(t)
+					}
 				}
 			case xml.EndElement:
 				switch t.Name.Local {
 				case "v":
 					inValue = false
+				case "t":
+					inInlineText = false
+				case "is":
+					// Al cerrar <is>, guardar el valor acumulado
+					if inRow && inInlineString {
+						currentCell.Value = inlineTextBuilder.String()
+						inInlineString = false
+					}
 				case "c":
 					if inRow {
 						currentRow = append(currentRow, currentCell)
 					}
 				case "row":
 					if inRow {
-						// ⚡ Convertir celdas a strings de forma eficiente
-						rowStrings := make([]string, len(currentRow))
-						for i, cell := range currentRow {
-							if cell.Type == "s" && cell.Value != "" {
-								if idx, err := strconv.Atoi(cell.Value); err == nil && idx < ssLen {
-									rowStrings[i] = sharedStrings[idx]
+						// ⚡ Determinar el número máximo de columnas basado en las referencias de celda
+						maxCol := 0
+						for _, cell := range currentRow {
+							if cell.Ref != "" {
+								colIdx := columnIndex(cell.Ref)
+								if colIdx >= maxCol {
+									maxCol = colIdx + 1
 								}
+							}
+						}
+						// Si no hay referencias, usar el número de celdas directamente
+						if maxCol == 0 {
+							maxCol = len(currentRow)
+						}
+						
+						// ⚡ Convertir celdas a strings usando las referencias de columna
+						rowStrings := make([]string, maxCol)
+						for _, cell := range currentRow {
+							var colIdx int
+							if cell.Ref != "" {
+								colIdx = columnIndex(cell.Ref)
 							} else {
-								rowStrings[i] = cell.Value
+								continue // Saltar celdas sin referencia
+							}
+							
+							if colIdx >= 0 && colIdx < len(rowStrings) {
+								if cell.Type == "s" && cell.Value != "" {
+									if idx, err := strconv.Atoi(cell.Value); err == nil && idx < ssLen {
+										rowStrings[colIdx] = sharedStrings[idx]
+									}
+								} else {
+									rowStrings[colIdx] = cell.Value
+								}
 							}
 						}
 						
@@ -1131,6 +1182,16 @@
 								headers[i] = header
 							}
 						} else {
+							// Para filas de datos, ajustar al número de headers si existe
+							if len(headers) > 0 && len(rowStrings) < len(headers) {
+								// Extender el slice para coincidir con headers
+								extended := make([]string, len(headers))
+								copy(extended, rowStrings)
+								rowStrings = extended
+							} else if len(headers) > 0 && len(rowStrings) > len(headers) {
+								// Truncar si hay más columnas que headers
+								rowStrings = rowStrings[:len(headers)]
+							}
 							rows = append(rows, rowStrings)
 							if progressCallback != nil && len(rows)%50000 == 0 {
 								progressCallback(len(rows))
@@ -1386,15 +1447,39 @@
 			}
 		}
 
-		// PASO 3: Construir array de headers
-		headers := make([]string, len(firstRowCells))
-		for i, cell := range firstRowCells {
-			if cell.Type == "s" && cell.Value != "" {
-				if idx, err := strconv.Atoi(cell.Value); err == nil {
-					headers[i] = sharedStrings[idx]
+		// PASO 3: Determinar el número máximo de columnas basado en las referencias
+		maxCol := 0
+		for _, cell := range firstRowCells {
+			if cell.Ref != "" {
+				colIdx := columnIndex(cell.Ref)
+				if colIdx >= maxCol {
+					maxCol = colIdx + 1
 				}
+			}
+		}
+		// Si no hay referencias, usar el número de celdas directamente
+		if maxCol == 0 {
+			maxCol = len(firstRowCells)
+		}
+		
+		// PASO 4: Construir array de headers usando las referencias de columna
+		headers := make([]string, maxCol)
+		for _, cell := range firstRowCells {
+			var colIdx int
+			if cell.Ref != "" {
+				colIdx = columnIndex(cell.Ref)
 			} else {
-				headers[i] = cell.Value
+				continue // Saltar celdas sin referencia
+			}
+			
+			if colIdx >= 0 && colIdx < len(headers) {
+				if cell.Type == "s" && cell.Value != "" {
+					if idx, err := strconv.Atoi(cell.Value); err == nil {
+						headers[colIdx] = sharedStrings[idx]
+					}
+				} else {
+					headers[colIdx] = cell.Value
+				}
 			}
 		}
 
@@ -1405,6 +1490,31 @@
 	type xmlCell struct {
 		Type  string // "s" = shared string, "inlineStr" = inline string, "" = valor directo
 		Value string
+		Ref   string // Referencia de celda (ej: "A1", "B5", "AA123")
+	}
+
+	// columnIndex convierte una referencia de columna de Excel (A, B, ..., Z, AA, AB) a un índice 0-based
+	func columnIndex(ref string) int {
+		// Extraer solo las letras de la referencia
+		letters := ""
+		for _, c := range ref {
+			if c >= 'A' && c <= 'Z' {
+				letters += string(c)
+			} else {
+				break
+			}
+		}
+		
+		if letters == "" {
+			return -1
+		}
+		
+		result := 0
+		for i, c := range letters {
+			result = result*26 + int(c-'A'+1)
+			_ = i
+		}
+		return result - 1 // Convertir a 0-based
 	}
 
 	// readFirstRowFromXML - Lee solo la primera fila del sheet XML
@@ -1475,9 +1585,11 @@
 						currentCell = xmlCell{}
 						inlineTextBuilder.Reset()
 						for _, attr := range t.Attr {
-							if attr.Name.Local == "t" {
+							switch attr.Name.Local {
+							case "t":
 								currentCell.Type = attr.Value
-								break
+							case "r":
+								currentCell.Ref = attr.Value
 							}
 						}
 					}

@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { ExcelMetadataEntity } from './excel-metadata.entity';
 import { DynamicRecordEntity } from './dynamic-record.entity';
+import { ExcelFormatEntity } from './excel-format.entity';
 import { env } from '../../config/env';
 import FormData from 'form-data';
 import * as fs from 'fs/promises';
@@ -30,6 +31,7 @@ interface PendingUpload {
   headers: string[];
   totalRows: number;
   createdAt: Date;
+  formatId?: number; // Si ya existe un formato para este archivo
 }
 
 @Injectable()
@@ -44,6 +46,8 @@ export class ExcelService implements OnModuleInit {
     private readonly metadataRepo: Repository<ExcelMetadataEntity>,
     @InjectRepository(DynamicRecordEntity)
     private readonly dynamicRecordRepo: Repository<DynamicRecordEntity>,
+    @InjectRepository(ExcelFormatEntity)
+    private readonly formatRepo: Repository<ExcelFormatEntity>,
     @Inject(forwardRef(() => WhatsAppGateway))
     private readonly gateway: WhatsAppGateway,
     @Inject(forwardRef(() => WhatsAppService))
@@ -360,9 +364,48 @@ export class ExcelService implements OnModuleInit {
     uploadedBy: string,
     userId: number,
     fromWhatsApp: boolean = false,
-  ): Promise<{ success: boolean; excelId: number; headers: string[]; totalRows: number; message: string }> {
+  ): Promise<{ 
+    success: boolean; 
+    excelId: number; 
+    headers: string[]; 
+    totalRows: number; 
+    message: string;
+    hasFormat?: boolean; // Si existe un formato guardado
+    format?: ExcelFormatEntity; // El formato encontrado
+    autoProcessing?: boolean; // Si se está procesando automáticamente
+  }> {
     try {
       this.logger.log(`📊 Leyendo cabeceras de: ${filename}`);
+      
+      // 0. Verificar si existe un formato guardado para este archivo
+      const existingFormat = await this.findFormatForFile(userId, filename);
+      
+      if (existingFormat) {
+        this.logger.log(`📋 Formato encontrado: "${existingFormat.name}" - Procesando automáticamente`);
+        
+        // Procesar automáticamente con el formato guardado
+        const result = await this.processWithSavedFormat(
+          filePath, 
+          filename, 
+          uploadedBy, 
+          userId, 
+          existingFormat
+        );
+        
+        if (result.success) {
+          return {
+            success: true,
+            excelId: result.excelId,
+            headers: existingFormat.headers,
+            totalRows: 0, // Se actualizará al procesar
+            message: `Procesando con formato "${existingFormat.name}"`,
+            hasFormat: true,
+            format: existingFormat,
+            autoProcessing: true,
+          };
+        }
+        // Si falla, continuar con flujo normal
+      }
       
       // 1. Leer solo las cabeceras (muy rápido)
       const { headers, totalRows } = await this.readExcelHeaders(filePath);
@@ -419,6 +462,7 @@ export class ExcelService implements OnModuleInit {
         headers,
         totalRows,
         message: 'Cabeceras leídas correctamente',
+        hasFormat: false,
       };
     } catch (error: any) {
       this.logger.error(`❌ Error leyendo cabeceras: ${error.message}`);
@@ -428,13 +472,17 @@ export class ExcelService implements OnModuleInit {
 
   /**
    * FASE 2: Continuar procesamiento con cabeceras seleccionadas
+   * @param saveFormat - Si es true, guarda la configuración como formato reutilizable
+   * @param formatName - Nombre del formato (requerido si saveFormat es true)
    */
   async continueProcessingWithHeaders(
     excelId: number,
     userId: number,
     selectedHeaders: string[],
     jwtToken?: string,
-  ): Promise<{ success: boolean; message: string }> {
+    saveFormat: boolean = false,
+    formatName?: string,
+  ): Promise<{ success: boolean; message: string; formatId?: number }> {
     const pending = this.pendingUploads.get(excelId);
     
     if (!pending) {
@@ -462,6 +510,21 @@ export class ExcelService implements OnModuleInit {
       const verification = await this.metadataRepo.findOne({ where: { id: excelId } });
       this.logger.log(`✅ Verificación: indexedHeaders = ${JSON.stringify(verification?.indexedHeaders)}`);
       
+      // 1.5. Guardar formato si se solicitó
+      let savedFormat: ExcelFormatEntity | null = null;
+      if (saveFormat) {
+        const name = formatName || pending.filename.replace(/\.(xlsx|xls)$/i, '');
+        savedFormat = await this.saveFormat(
+          userId,
+          name,
+          pending.filename,
+          pending.headers,
+          selectedHeaders,
+          excelId,
+        );
+        this.logger.log(`💾 Formato guardado: "${savedFormat.name}" (id=${savedFormat.id})`);
+      }
+      
       // 2. ⚡ Enviar solo el PATH al Go processor (no el archivo completo)
       // Go leerá el archivo directamente desde el path
       const response = await axios.post(
@@ -482,7 +545,11 @@ export class ExcelService implements OnModuleInit {
       // 3. Limpiar estado pendiente (el archivo lo elimina Go)
       this.pendingUploads.delete(excelId);
 
-      return { success: true, message: 'Procesamiento iniciado correctamente' };
+      return { 
+        success: true, 
+        message: saveFormat ? `Procesando y formato "${savedFormat?.name}" guardado` : 'Procesamiento iniciado correctamente',
+        formatId: savedFormat?.id,
+      };
     } catch (error: any) {
       this.logger.error(`❌ Error continuando procesamiento: ${error.message}`);
       return { success: false, message: error.message };
@@ -906,6 +973,16 @@ export class ExcelService implements OnModuleInit {
     // ⚡ Eliminar índices asociados a este Excel
     await this.dropIndexesForExcel(excelId);
 
+    // 🗑️ SIEMPRE eliminar el formato asociado (para que vuelva a pedir cabeceras)
+    const format = await this.formatRepo.findOne({
+      where: { currentExcelId: excelId, userId },
+    });
+    
+    if (format) {
+      await this.formatRepo.remove(format);
+      this.logger.log(`🗑️ Formato eliminado junto con Excel: ${format.name} (id=${format.id})`);
+    }
+
     // Eliminar registros asociados (se eliminan automáticamente por onDelete: 'CASCADE')
     // Eliminar metadata
     await this.metadataRepo.remove(excel);
@@ -1093,6 +1170,201 @@ export class ExcelService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.warn(`⚠️ Error eliminando índices: ${error.message}`);
+    }
+  }
+
+  // ============================================================================
+  // GESTIÓN DE FORMATOS DE EXCEL (Guardar estructura para reutilización)
+  // ============================================================================
+
+  /**
+   * Extrae el patrón base del nombre del archivo
+   * Ej: "inversiones.xlsx" -> "inversiones"
+   *     "inversiones_v2.xlsx" -> "inversiones"
+   *     "inversiones (1).xlsx" -> "inversiones"
+   */
+  private extractFilePattern(filename: string): string {
+    // Quitar extensión
+    let pattern = filename.replace(/\.(xlsx|xls)$/i, '');
+    // Quitar sufijos comunes como _v2, _v3, (1), (2), _copy, etc.
+    pattern = pattern.replace(/[_\s]*(v\d+|\(\d+\)|copy|copia|nuevo|new|\d{8,})$/i, '');
+    // Normalizar: minúsculas y sin espacios extra
+    pattern = pattern.toLowerCase().trim();
+    return pattern;
+  }
+
+  /**
+   * Buscar un formato existente para un archivo
+   */
+  async findFormatForFile(userId: number, filename: string): Promise<ExcelFormatEntity | null> {
+    const pattern = this.extractFilePattern(filename);
+    
+    // Buscar formato que coincida con el patrón
+    const format = await this.formatRepo.findOne({
+      where: { userId, filePattern: pattern, isActive: true },
+    });
+    
+    if (format) {
+      this.logger.log(`📋 Formato encontrado para "${filename}": ${format.name} (id=${format.id})`);
+    }
+    
+    return format;
+  }
+
+  /**
+   * Crear o actualizar un formato de Excel
+   */
+  async saveFormat(
+    userId: number,
+    name: string,
+    filename: string,
+    headers: string[],
+    indexedHeaders: string[],
+    excelId: number,
+  ): Promise<ExcelFormatEntity> {
+    const pattern = this.extractFilePattern(filename);
+    
+    // Verificar si ya existe un formato con este patrón
+    let format = await this.formatRepo.findOne({
+      where: { userId, filePattern: pattern },
+    });
+    
+    if (format) {
+      // Actualizar formato existente
+      format.name = name;
+      format.headers = headers;
+      format.indexedHeaders = indexedHeaders;
+      format.currentExcelId = excelId;
+      format.isActive = true;
+      format = await this.formatRepo.save(format);
+      this.logger.log(`📝 Formato actualizado: ${format.name} (id=${format.id})`);
+    } else {
+      // Crear nuevo formato
+      format = this.formatRepo.create({
+        userId,
+        name,
+        filePattern: pattern,
+        headers,
+        indexedHeaders,
+        currentExcelId: excelId,
+        isActive: true,
+      });
+      format = await this.formatRepo.save(format);
+      this.logger.log(`✅ Nuevo formato creado: ${format.name} (id=${format.id})`);
+    }
+    
+    return format;
+  }
+
+  /**
+   * Obtener todos los formatos de un usuario
+   */
+  async getAllFormats(userId: number): Promise<ExcelFormatEntity[]> {
+    return this.formatRepo.find({
+      where: { userId, isActive: true },
+      order: { updatedAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Obtener un formato por ID
+   */
+  async getFormatById(userId: number, formatId: number): Promise<ExcelFormatEntity | null> {
+    return this.formatRepo.findOne({
+      where: { id: formatId, userId },
+    });
+  }
+
+  /**
+   * Eliminar un formato
+   */
+  async deleteFormat(userId: number, formatId: number): Promise<{ success: boolean; message: string }> {
+    const format = await this.formatRepo.findOne({
+      where: { id: formatId, userId },
+    });
+    
+    if (!format) {
+      return { success: false, message: 'Formato no encontrado' };
+    }
+    
+    await this.formatRepo.remove(format);
+    this.logger.log(`🗑️ Formato eliminado: ${format.name} (id=${formatId})`);
+    
+    return { success: true, message: 'Formato eliminado correctamente' };
+  }
+
+  /**
+   * Procesar un archivo con formato guardado (automático)
+   * - Elimina el Excel anterior asociado al formato
+   * - Crea uno nuevo con la misma configuración
+   */
+  async processWithSavedFormat(
+    filePath: string,
+    filename: string,
+    uploadedBy: string,
+    userId: number,
+    format: ExcelFormatEntity,
+  ): Promise<{ success: boolean; excelId: number; message: string }> {
+    try {
+      this.logger.log(`🔄 Procesando con formato guardado: ${format.name}`);
+      
+      // 1. Eliminar Excel anterior si existe
+      if (format.currentExcelId) {
+        const oldExcel = await this.metadataRepo.findOne({ 
+          where: { id: format.currentExcelId, userId } 
+        });
+        
+        if (oldExcel) {
+          this.logger.log(`🗑️ Eliminando Excel anterior (id=${oldExcel.id}): ${oldExcel.filename}`);
+          await this.dropIndexesForExcel(oldExcel.id);
+          await this.dynamicRecordRepo.delete({ excelId: oldExcel.id });
+          await this.metadataRepo.remove(oldExcel);
+        }
+      }
+      
+      // 2. Leer cabeceras del nuevo archivo para verificar que coincidan
+      const { headers, totalRows } = await this.readExcelHeaders(filePath);
+      
+      // 3. Crear nueva metadata
+      const metadata = this.metadataRepo.create({
+        userId,
+        filename,
+        uploadedBy,
+        totalRecords: 0,
+        headers,
+        indexedHeaders: format.indexedHeaders,
+        isReactive: true,
+      });
+      const savedMetadata = await this.metadataRepo.save(metadata);
+      
+      // 4. Actualizar formato con el nuevo Excel
+      format.currentExcelId = savedMetadata.id;
+      await this.formatRepo.save(format);
+      
+      // 5. Procesar el archivo con Go
+      const response = await axios.post(
+        `${env.EXCEL_PROCESSOR_URL}/process-from-path`,
+        {
+          excel_id: savedMetadata.id,
+          user_id: userId,
+          filename,
+          uploaded_by: uploadedBy,
+          temp_path: filePath,
+          selected_headers: format.indexedHeaders,
+        },
+        { timeout: 300000 }
+      );
+      
+      this.logger.log(`✅ Archivo procesado con formato guardado: ${format.name}`);
+      
+      return {
+        success: true,
+        excelId: savedMetadata.id,
+        message: `Procesando con formato "${format.name}"`,
+      };
+    } catch (error: any) {
+      this.logger.error(`❌ Error procesando con formato guardado: ${error.message}`);
+      return { success: false, excelId: 0, message: error.message };
     }
   }
 }
