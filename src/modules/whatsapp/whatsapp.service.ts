@@ -308,14 +308,15 @@ export class WhatsAppService {
       await fs.mkdir(path.join(process.cwd(), 'temp'), { recursive: true });
       await fs.writeFile(tempPath, buffer);
 
-      // Verificar que el número que envía esté autorizado para ESTE usuario (el de la sesión)
-      const isAuthorized = await this.configService.isAuthorized(userId, senderNumber);
-      this.logger.log(`🔍 Debug: senderNumber=${senderNumber}, userId=${userId}, isAuthorized=${isAuthorized}`);
+      // Verificar que el número tenga permiso para enviar Excel
+      const canSendExcel = await this.configService.canPhoneNumberSendExcel(userId, senderNumber);
+      this.logger.log(`🔍 Debug: senderNumber=${senderNumber}, userId=${userId}, canSendExcel=${canSendExcel}`);
       
-      if (!isAuthorized) {
-        // El número no está autorizado para este usuario, ignorar silenciosamente
-        this.logger.log(`📊 Excel de ${senderNumber} ignorado - no autorizado para usuario ${userId}`);
+      if (!canSendExcel) {
+        // El número no tiene permiso para enviar Excel
+        this.logger.log(`📊 Excel de ${senderNumber} rechazado - no tiene permiso canSendExcel para usuario ${userId}`);
         await fs.unlink(tempPath);
+        await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para enviar archivos Excel.');
         return;
       }
 
@@ -478,6 +479,14 @@ export class WhatsAppService {
       }
 
       this.logger.log(`🔍 Buscando keyword="${keyword}" valor="${searchValue}"`);
+
+      // Verificar que el número tenga permiso para solicitar información
+      const canRequestInfo = await this.configService.canPhoneNumberRequestInfo(userId, senderNumber);
+      if (!canRequestInfo) {
+        this.logger.log(`🔍 Búsqueda de ${senderNumber} rechazada - no tiene permiso canRequestInfo para usuario ${userId}`);
+        await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para solicitar información.');
+        return;
+      }
 
       // Buscar template activo con esta palabra clave
       const template = await this.messageTemplatesService.findByKeyword(userId, keyword);

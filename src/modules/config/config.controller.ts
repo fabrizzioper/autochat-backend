@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Delete, Body, Param, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, BadRequestException } from '@nestjs/common';
 import { ConfigService, AuthorizationMode } from './config.service';
+import { CreateAuthorizedNumberDto, UpdateAuthorizedNumberDto } from './dto/authorized-number.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from '../auth/decorators/get-user.decorator';
 import { UserEntity } from '../users/user.entity';
@@ -142,6 +143,79 @@ export class ConfigController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeReactiveFilename(@GetUser() user: UserEntity): Promise<void> {
     await this.service.removeReactiveExcelFilename(user.id);
+  }
+
+  // ==================== CRUD NÚMEROS AUTORIZADOS V2 (Nueva tabla) ====================
+
+  @Get('authorized-numbers-v2')
+  async getAllAuthorizedNumbersV2(
+    @GetUser() user: UserEntity,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    const pageNum = parseInt(page || '1', 10) || 1;
+    const limitNum = parseInt(limit || '10', 10) || 10;
+    
+    const result = await this.service.getAuthorizedNumbersPaginated(
+      user.id,
+      pageNum,
+      Math.min(limitNum, 100), // máximo 100 por página
+      search,
+    );
+    
+    const mode = await this.service.getAuthorizationMode(user.id);
+    
+    return {
+      ...result,
+      mode,
+    };
+  }
+
+  @Get('authorized-numbers-v2/:id')
+  async getAuthorizedNumberV2ById(
+    @GetUser() user: UserEntity,
+    @Param('id') id: string,
+  ) {
+    return this.service.getAuthorizedNumberById(user.id, parseInt(id, 10));
+  }
+
+  @Post('authorized-numbers-v2')
+  @HttpCode(HttpStatus.CREATED)
+  async createAuthorizedNumberV2(
+    @GetUser() user: UserEntity,
+    @Body() dto: CreateAuthorizedNumberDto,
+  ) {
+    try {
+      const created = await this.service.createAuthorizedNumber(user.id, dto);
+      return { message: 'Número autorizado creado exitosamente', data: created };
+    } catch (error: any) {
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  @Put('authorized-numbers-v2/:id')
+  @HttpCode(HttpStatus.OK)
+  async updateAuthorizedNumberV2(
+    @GetUser() user: UserEntity,
+    @Param('id') id: string,
+    @Body() dto: UpdateAuthorizedNumberDto,
+  ) {
+    try {
+      const updated = await this.service.updateAuthorizedNumber(user.id, parseInt(id, 10), dto);
+      return { message: 'Número autorizado actualizado exitosamente', data: updated };
+    } catch (error: any) {
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  @Delete('authorized-numbers-v2/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteAuthorizedNumberV2(
+    @GetUser() user: UserEntity,
+    @Param('id') id: string,
+  ): Promise<void> {
+    await this.service.deleteAuthorizedNumber(user.id, parseInt(id, 10));
   }
 }
 

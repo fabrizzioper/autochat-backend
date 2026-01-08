@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigEntity } from './config.entity';
+import { AuthorizedNumberEntity } from './authorized-number.entity';
+import { CreateAuthorizedNumberDto, UpdateAuthorizedNumberDto } from './dto/authorized-number.dto';
 
 const AUTHORIZED_NUMBER_KEY = 'authorized_number';
 const ALLOW_ALL_NUMBERS_KEY = 'allow_all_numbers';
@@ -18,6 +20,8 @@ export class ConfigService {
   constructor(
     @InjectRepository(ConfigEntity)
     private readonly repo: Repository<ConfigEntity>,
+    @InjectRepository(AuthorizedNumberEntity)
+    private readonly authorizedNumberRepo: Repository<AuthorizedNumberEntity>,
   ) {}
 
   async getAuthorizedNumber(userId: number): Promise<string | null> {
@@ -179,20 +183,36 @@ export class ConfigService {
         return sessionUserId;
       }
       
-      // Modo 'list': verificar si el número está en la lista
-      const numbers = await this.getAuthorizedNumbersList(sessionUserId);
-      this.logger.log(`🔍 [AUTH] Lista de números autorizados: [${numbers.join(', ')}]`);
+      // Modo 'list': verificar en la NUEVA tabla de números autorizados
+      const authorizedNumber = await this.getAuthorizedNumberByPhone(sessionUserId, phoneNumber);
       
-      if (numbers.includes(phoneNumber)) {
-        this.logger.log(`✅ [AUTH] Número ${phoneNumber} está en la lista - autorizando`);
+      if (authorizedNumber) {
+        this.logger.log(`✅ [AUTH] Número ${phoneNumber} encontrado en tabla V2 - autorizando`);
         return sessionUserId;
       }
       
-      this.logger.log(`❌ [AUTH] Número ${phoneNumber} NO está en la lista - rechazando`);
+      // Fallback: También verificar en la lista vieja (para compatibilidad)
+      const numbers = await this.getAuthorizedNumbersList(sessionUserId);
+      if (numbers.includes(phoneNumber)) {
+        this.logger.log(`✅ [AUTH] Número ${phoneNumber} está en la lista legacy - autorizando`);
+        return sessionUserId;
+      }
+      
+      this.logger.log(`❌ [AUTH] Número ${phoneNumber} NO está autorizado - rechazando`);
       return null;
     }
     
-    // Solo si no hay sessionUserId, buscar en todos los usuarios
+    // Solo si no hay sessionUserId, buscar en todos los usuarios (ambas tablas)
+    // Primero buscar en la nueva tabla
+    const allAuthorizedNumbers = await this.authorizedNumberRepo.find({
+      where: { phoneNumber },
+    });
+    
+    if (allAuthorizedNumbers.length > 0) {
+      return allAuthorizedNumbers[0].userId;
+    }
+    
+    // Fallback: buscar en la tabla vieja
     const allConfigs = await this.repo.find({ 
       where: { key: AUTHORIZED_NUMBER_KEY },
     });
@@ -247,6 +267,151 @@ export class ConfigService {
     const normalizedReactive = reactiveFilename.toLowerCase().replace(/\.xlsx?$/i, '');
     
     return normalizedFilename.includes(normalizedReactive) || normalizedReactive.includes(normalizedFilename);
+  }
+
+  // ==================== CRUD NÚMEROS AUTORIZADOS (Nueva tabla) ====================
+
+  async createAuthorizedNumber(userId: number, dto: CreateAuthorizedNumberDto): Promise<AuthorizedNumberEntity> {
+    // Verificar si ya existe el número para este usuario
+    const existing = await this.authorizedNumberRepo.findOne({
+      where: { userId, phoneNumber: dto.phoneNumber },
+    });
+    
+    if (existing) {
+      throw new Error('Este número ya está registrado');
+    }
+
+    const newNumber = new AuthorizedNumberEntity();
+    newNumber.userId = userId;
+    newNumber.phoneNumber = dto.phoneNumber;
+    newNumber.dni = dto.dni || '';
+    newNumber.firstName = dto.firstName || '';
+    newNumber.lastName = dto.lastName || '';
+    newNumber.entityName = dto.entityName || '';
+    newNumber.position = dto.position || '';
+    newNumber.canSendExcel = dto.canSendExcel ?? true;
+    newNumber.canRequestInfo = dto.canRequestInfo ?? true;
+
+    const saved = await this.authorizedNumberRepo.save(newNumber);
+    this.logger.log(`✅ Número autorizado creado: ${dto.phoneNumber} para usuario ${userId}`);
+    return saved;
+  }
+
+  async getAllAuthorizedNumbers(userId: number): Promise<AuthorizedNumberEntity[]> {
+    return this.authorizedNumberRepo.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async getAuthorizedNumbersPaginated(
+    userId: number,
+    page: number = 1,
+    limit: number = 10,
+    search?: string,
+  ): Promise<{ data: AuthorizedNumberEntity[]; total: number; page: number; limit: number; totalPages: number }> {
+    const skip = (page - 1) * limit;
+    
+    const queryBuilder = this.authorizedNumberRepo
+      .createQueryBuilder('an')
+      .where('an.userId = :userId', { userId });
+
+    // Búsqueda por teléfono, nombre, apellido o DNI
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim().toLowerCase()}%`;
+      queryBuilder.andWhere(
+        '(LOWER(an.phoneNumber) LIKE :search OR LOWER(an.firstName) LIKE :search OR LOWER(an.lastName) LIKE :search OR LOWER(an.dni) LIKE :search)',
+        { search: searchTerm }
+      );
+    }
+
+    const [data, total] = await queryBuilder
+      .orderBy('an.createdAt', 'DESC')
+      .skip(skip)
+      .take(limit)
+      .getManyAndCount();
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async getAuthorizedNumberById(userId: number, id: number): Promise<AuthorizedNumberEntity> {
+    const entity = await this.authorizedNumberRepo.findOne({
+      where: { id, userId },
+    });
+    
+    if (!entity) {
+      throw new NotFoundException('Número autorizado no encontrado');
+    }
+    
+    return entity;
+  }
+
+  async updateAuthorizedNumber(userId: number, id: number, dto: UpdateAuthorizedNumberDto): Promise<AuthorizedNumberEntity> {
+    const entity = await this.getAuthorizedNumberById(userId, id);
+    
+    // Si se cambia el número, verificar que no exista ya
+    if (dto.phoneNumber && dto.phoneNumber !== entity.phoneNumber) {
+      const existing = await this.authorizedNumberRepo.findOne({
+        where: { userId, phoneNumber: dto.phoneNumber },
+      });
+      if (existing) {
+        throw new Error('Este número ya está registrado');
+      }
+    }
+
+    Object.assign(entity, dto);
+    const updated = await this.authorizedNumberRepo.save(entity);
+    this.logger.log(`✏️ Número autorizado actualizado: ${entity.phoneNumber} para usuario ${userId}`);
+    return updated;
+  }
+
+  async deleteAuthorizedNumber(userId: number, id: number): Promise<void> {
+    const entity = await this.getAuthorizedNumberById(userId, id);
+    await this.authorizedNumberRepo.remove(entity);
+    this.logger.log(`🗑️ Número autorizado eliminado: ${entity.phoneNumber} para usuario ${userId}`);
+  }
+
+  // Verificación de permisos específicos
+  async getAuthorizedNumberByPhone(userId: number, phoneNumber: string): Promise<AuthorizedNumberEntity | null> {
+    return this.authorizedNumberRepo.findOne({
+      where: { userId, phoneNumber },
+    });
+  }
+
+  async canPhoneNumberSendExcel(userId: number, phoneNumber: string): Promise<boolean> {
+    const mode = await this.getAuthorizationMode(userId);
+    if (mode === 'none') return false;
+    if (mode === 'all') return true;
+    
+    const entity = await this.getAuthorizedNumberByPhone(userId, phoneNumber);
+    return entity?.canSendExcel ?? false;
+  }
+
+  async canPhoneNumberRequestInfo(userId: number, phoneNumber: string): Promise<boolean> {
+    const mode = await this.getAuthorizationMode(userId);
+    if (mode === 'none') return false;
+    if (mode === 'all') return true;
+    
+    const entity = await this.getAuthorizedNumberByPhone(userId, phoneNumber);
+    return entity?.canRequestInfo ?? false;
+  }
+
+  // Actualizar isAuthorized para usar la nueva tabla
+  async isAuthorizedV2(userId: number, phoneNumber: string): Promise<boolean> {
+    const mode = await this.getAuthorizationMode(userId);
+    
+    if (mode === 'none') return false;
+    if (mode === 'all') return true;
+    
+    // mode === 'list': verificar en la nueva tabla de números autorizados
+    const entity = await this.getAuthorizedNumberByPhone(userId, phoneNumber);
+    return entity !== null;
   }
 }
 
