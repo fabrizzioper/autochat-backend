@@ -308,16 +308,29 @@ export class WhatsAppService {
       await fs.mkdir(path.join(process.cwd(), 'temp'), { recursive: true });
       await fs.writeFile(tempPath, buffer);
 
-      // Verificar que el número tenga permiso para enviar Excel
-      const canSendExcel = await this.configService.canPhoneNumberSendExcel(userId, senderNumber);
-      this.logger.log(`🔍 Debug: senderNumber=${senderNumber}, userId=${userId}, canSendExcel=${canSendExcel}`);
+      // Verificar permisos para enviar Excel
+      const mode = await this.configService.getAuthorizationMode(userId);
       
-      if (!canSendExcel) {
-        // El número no tiene permiso para enviar Excel
-        this.logger.log(`📊 Excel de ${senderNumber} rechazado - no tiene permiso canSendExcel para usuario ${userId}`);
-        await fs.unlink(tempPath);
-        await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para enviar archivos Excel.');
-        return;
+      if (mode === 'list') {
+        // Verificar si el número está en la nueva tabla
+        const authorizedNumber = await this.configService.getAuthorizedNumberByPhone(userId, senderNumber);
+        
+        if (!authorizedNumber) {
+          // Número NO está en la lista - ignorar silenciosamente
+          this.logger.log(`📊 Excel de ${senderNumber} ignorado - número no está en la lista`);
+          await fs.unlink(tempPath);
+          return;
+        }
+        
+        if (!authorizedNumber.canSendExcel) {
+          // Número ESTÁ en la lista pero sin permiso de Excel
+          this.logger.log(`📊 Excel de ${senderNumber} rechazado - no tiene permiso canSendExcel`);
+          await fs.unlink(tempPath);
+          await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para enviar archivos Excel.');
+          return;
+        }
+        
+        this.logger.log(`🔍 Debug: senderNumber=${senderNumber}, userId=${userId}, canSendExcel=true`);
       }
 
       // Verificar si hay un nombre de archivo configurado para ESTE usuario
@@ -449,6 +462,52 @@ export class WhatsAppService {
 
       // PASO 2: Si no hay upload pendiente o no son números, procesar como búsqueda normal
       
+      // Primero verificar permisos para solicitar información
+      const searchMode = await this.configService.getAuthorizationMode(userId);
+      
+      if (searchMode === 'list') {
+        const authorizedNumber = await this.configService.getAuthorizedNumberByPhone(userId, senderNumber);
+        
+        if (!authorizedNumber) {
+          // Número NO está en la lista - ignorar silenciosamente
+          this.logger.log(`🔍 Mensaje de ${senderNumber} ignorado - número no está en la lista`);
+          return;
+        }
+        
+        if (!authorizedNumber.canRequestInfo) {
+          // Número ESTÁ en la lista pero sin permiso de búsqueda
+          this.logger.log(`🔍 Mensaje de ${senderNumber} rechazado - no tiene permiso canRequestInfo`);
+          await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para solicitar información.');
+          return;
+        }
+      } else if (searchMode === 'none') {
+        // Modo ninguno - ignorar
+        return;
+      }
+      
+      // COMANDO "ayuda" o "lista" - listar solo nombres de respuestas
+      const helpCommands = ['ayuda', 'help', 'lista', 'respuestas', 'comandos', 'menu'];
+      const normalizedText = text.trim().toLowerCase();
+      
+      if (helpCommands.includes(normalizedText)) {
+        const allTemplates = await this.messageTemplatesService.findAll(userId);
+        const activeTemplates = allTemplates.filter(t => t.isActive);
+        
+        if (activeTemplates.length === 0) {
+          await this.sendMessage(userId, senderNumber, '📋 No hay respuestas configuradas.');
+          return;
+        }
+        
+        let helpMessage = '📋 *Respuestas disponibles:*\n\n';
+        activeTemplates.forEach((t, idx) => {
+          helpMessage += `${idx + 1}. *${t.name}*\n`;
+        });
+        helpMessage += '\n💡 _Escribe el nombre del mensaje para ver las columnas de búsqueda_';
+        
+        await this.sendMessage(userId, senderNumber, helpMessage);
+        return;
+      }
+      
       // Intentar parsear el mensaje en formato "keyword: valor" o "keyword valor"
       const colonMatch = text.match(/^(\S+)\s*:\s*(.+)$/i);
       const spaceMatch = text.match(/^(\S+)\s+(.+)$/);
@@ -462,6 +521,90 @@ export class WhatsAppService {
       } else if (spaceMatch) {
         keyword = spaceMatch[1].toLowerCase();
         searchValue = spaceMatch[2].trim();
+      }
+      
+      // Si solo hay una palabra o varias palabras sin ":", buscar por nombre de respuesta
+      if (!searchValue) {
+        const searchTerm = text.trim().toLowerCase();
+        const allTemplates = await this.messageTemplatesService.findAll(userId);
+        
+        // Buscar template por nombre (normalizado sin tildes)
+        const normalizeForSearch = (str: string) => str
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        
+        const normalizedSearch = normalizeForSearch(searchTerm);
+        const foundTemplate = allTemplates.find(t => 
+          t.isActive && normalizeForSearch(t.name) === normalizedSearch
+        );
+        
+        if (foundTemplate && foundTemplate.searchColumns && foundTemplate.keywords) {
+          // Agrupar palabras clave por columna
+          const columnKeywordsMap = new Map<string, string[]>();
+          
+          for (let i = 0; i < foundTemplate.searchColumns.length; i++) {
+            const col = foundTemplate.searchColumns[i];
+            const kw = foundTemplate.keywords[i];
+            if (col && kw) {
+              if (!columnKeywordsMap.has(col)) {
+                columnKeywordsMap.set(col, []);
+              }
+              columnKeywordsMap.get(col)!.push(kw);
+            }
+          }
+          
+          let detailMessage = `📋 *${foundTemplate.name}*\n\n`;
+          detailMessage += `🔍 *Columnas de búsqueda:*\n`;
+          
+          let colIdx = 1;
+          const examples: string[] = [];
+          columnKeywordsMap.forEach((keywords, column) => {
+            detailMessage += `  ${colIdx}. ${column} → ${keywords.join(', ')}\n`;
+            examples.push(`${keywords[0]}: valor`);
+            colIdx++;
+          });
+          
+          detailMessage += `\n💡 *Ejemplos:*\n${examples.slice(0, 2).join('\n')}`;
+          
+          await this.sendMessage(userId, senderNumber, detailMessage);
+          return;
+        }
+        
+        // Si no encontró por nombre, buscar por keyword
+        const helpTemplate = await this.messageTemplatesService.findByKeyword(userId, searchTerm);
+        
+        if (helpTemplate && helpTemplate.searchColumns && helpTemplate.keywords) {
+          // Agrupar palabras clave por columna
+          const columnKeywordsMap = new Map<string, string[]>();
+          
+          for (let i = 0; i < helpTemplate.searchColumns.length; i++) {
+            const col = helpTemplate.searchColumns[i];
+            const kw = helpTemplate.keywords[i];
+            if (col && kw) {
+              if (!columnKeywordsMap.has(col)) {
+                columnKeywordsMap.set(col, []);
+              }
+              columnKeywordsMap.get(col)!.push(kw);
+            }
+          }
+          
+          let detailMessage = `📋 *${helpTemplate.name}*\n\n`;
+          detailMessage += `🔍 *Columnas de búsqueda:*\n`;
+          
+          let colIdx = 1;
+          const examples: string[] = [];
+          columnKeywordsMap.forEach((keywords, column) => {
+            detailMessage += `  ${colIdx}. ${column} → ${keywords.join(', ')}\n`;
+            examples.push(`${keywords[0]}: valor`);
+            colIdx++;
+          });
+          
+          detailMessage += `\n💡 *Ejemplos:*\n${examples.slice(0, 2).join('\n')}`;
+          
+          await this.sendMessage(userId, senderNumber, detailMessage);
+          return;
+        }
       }
       
       if (!keyword || !searchValue) {
@@ -480,13 +623,6 @@ export class WhatsAppService {
 
       this.logger.log(`🔍 Buscando keyword="${keyword}" valor="${searchValue}"`);
 
-      // Verificar que el número tenga permiso para solicitar información
-      const canRequestInfo = await this.configService.canPhoneNumberRequestInfo(userId, senderNumber);
-      if (!canRequestInfo) {
-        this.logger.log(`🔍 Búsqueda de ${senderNumber} rechazada - no tiene permiso canRequestInfo para usuario ${userId}`);
-        await this.sendMessage(userId, senderNumber, '⚠️ No tienes permiso para solicitar información.');
-        return;
-      }
 
       // Buscar template activo con esta palabra clave
       const template = await this.messageTemplatesService.findByKeyword(userId, keyword);

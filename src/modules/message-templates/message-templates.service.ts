@@ -26,6 +26,17 @@ export class MessageTemplatesService {
     private readonly repo: Repository<MessageTemplateEntity>,
   ) {}
 
+  /**
+   * Normaliza texto: quita tildes/acentos, convierte a minúsculas
+   */
+  private normalizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .trim()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, ''); // Quita diacríticos (tildes, etc.)
+  }
+
   async findAll(userId: number): Promise<MessageTemplateEntity[]> {
     return this.repo.find({
       where: { userId },
@@ -54,13 +65,14 @@ export class MessageTemplatesService {
       relations: ['excel'],
     });
     
-    const normalizedKeyword = keyword.toLowerCase().trim();
+    // Normalizar keyword (quita tildes y convierte a minúsculas)
+    const normalizedKeyword = this.normalizeText(keyword);
     
-    // Buscar template que tenga esta keyword en su array
+    // Buscar template que tenga esta keyword en su array (comparación normalizada)
     return templates.find(template => 
       template.keywords && 
       Array.isArray(template.keywords) &&
-      template.keywords.some(k => k.toLowerCase().trim() === normalizedKeyword)
+      template.keywords.some(k => this.normalizeText(k) === normalizedKeyword)
     ) || null;
   }
 
