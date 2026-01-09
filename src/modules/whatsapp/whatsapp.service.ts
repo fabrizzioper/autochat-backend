@@ -438,11 +438,22 @@ export class WhatsAppService {
       if (pendingFormat && pendingFormat.senderNumber === senderNumber) {
         const lowerText = text.toLowerCase().trim();
         
-        // Usuario responde "no" - no guardar
+        // Usuario responde "no" - no guardar, pero sí procesar
         if (lowerText === 'no' || lowerText === 'no guardar') {
-          this.pendingFormatSaves.delete(userId);
-          await this.sendMessage(userId, senderNumber, '👍 Entendido, no se guardó el formato.');
+          await this.sendMessage(userId, senderNumber, '👍 Entendido, no se guardará el formato.');
           this.logger.log(`📋 Usuario ${userId} decidió no guardar el formato`);
+          
+          // Ahora sí procesar el Excel
+          const confirmMessage = `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingFormat.filename}\n🔍 Columnas indexadas: ${pendingFormat.indexedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`;
+          await this.sendMessage(userId, senderNumber, confirmMessage);
+          
+          await this.excelService.continueProcessingWithHeaders(
+            pendingFormat.excelId,
+            userId,
+            pendingFormat.indexedHeaders,
+          );
+          
+          this.pendingFormatSaves.delete(userId);
           return;
         }
         
@@ -461,8 +472,6 @@ export class WhatsAppService {
             pendingFormat.excelId,
           );
           
-          this.pendingFormatSaves.delete(userId);
-          
           const successMessage = 
             `💾 *Formato guardado exitosamente*\n\n` +
             `📋 Nombre: ${savedFormat.name}\n` +
@@ -472,6 +481,18 @@ export class WhatsAppService {
           
           await this.sendMessage(userId, senderNumber, successMessage);
           this.logger.log(`💾 Formato "${savedFormat.name}" guardado por usuario ${userId}`);
+          
+          // Ahora sí procesar el Excel
+          const confirmMessage = `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingFormat.filename}\n🔍 Columnas indexadas: ${pendingFormat.indexedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`;
+          await this.sendMessage(userId, senderNumber, confirmMessage);
+          
+          await this.excelService.continueProcessingWithHeaders(
+            pendingFormat.excelId,
+            userId,
+            pendingFormat.indexedHeaders,
+          );
+          
+          this.pendingFormatSaves.delete(userId);
           return;
         }
         
@@ -519,45 +540,32 @@ export class WhatsAppService {
           
           this.logger.log(`📌 Columnas seleccionadas para indexar: ${selectedHeaders.join(', ')}`);
           
-          // Continuar procesamiento con las columnas seleccionadas (sin guardar formato aún)
-          const result = await this.excelService.continueProcessingWithHeaders(
-            pendingUpload.excelId,
-            userId,
-            selectedHeaders,
-          );
-
-          if (result.success) {
-            // Mensaje 1: Confirmación de procesamiento
-            const confirmMessage = `✅ *Procesando Excel*\n\n📁 Archivo: ${pendingUpload.filename}\n🔍 Columnas indexadas: ${selectedHeaders.join(', ')}\n\n_El proceso continuará en segundo plano. Recibirás una notificación cuando termine._`;
-            await this.sendMessage(userId, senderNumber, confirmMessage);
-            
-            // Guardar estado pendiente para guardar formato
-            this.pendingFormatSaves.set(userId, {
-              excelId: pendingUpload.excelId,
-              filename: pendingUpload.filename,
-              headers: pendingUpload.headers,
-              indexedHeaders: selectedHeaders,
-              senderNumber,
-              createdAt: new Date(),
-            });
-            
-            // Mensaje 2 (separado): Preguntar si quiere guardar formato
-            setTimeout(async () => {
-              const formatQuestion = 
-                `💾 *¿Guardar configuración?*\n\n` +
-                `Si guardas este formato, la próxima vez que subas "${pendingUpload.filename}" se procesará automáticamente con las mismas columnas.\n\n` +
-                `📌 Responde:\n` +
-                `• *guardar* - Guardar con nombre automático\n` +
-                `• *guardar [nombre]* - Guardar con nombre personalizado\n` +
-                `• *no* - No guardar\n\n` +
-                `_Ej: guardar Inversiones MEF_`;
-              
-              await this.sendMessage(userId, senderNumber, formatQuestion);
-            }, 1500); // Esperar 1.5 segundos para que se vea como mensaje separado
-            
-          } else {
-            await this.sendMessage(userId, senderNumber, `❌ Error: ${result.message}`);
-          }
+          // NO procesar todavía - guardar estado pendiente y preguntar si guardar
+          this.pendingFormatSaves.set(userId, {
+            excelId: pendingUpload.excelId,
+            filename: pendingUpload.filename,
+            headers: pendingUpload.headers,
+            indexedHeaders: selectedHeaders,
+            senderNumber,
+            createdAt: new Date(),
+          });
+          
+          // Limpiar el upload pendiente ya que capturamos las columnas
+          this.excelService.clearPendingUploadForUser(userId);
+          
+          // Preguntar si quiere guardar formato (el procesamiento ocurrirá después de la respuesta)
+          const formatQuestion = 
+            `💾 *¿Guardar configuración?*\n\n` +
+            `📁 Archivo: ${pendingUpload.filename}\n` +
+            `🔍 Columnas seleccionadas: ${selectedHeaders.join(', ')}\n\n` +
+            `Si guardas este formato, la próxima vez que subas este archivo se procesará automáticamente.\n\n` +
+            `📌 Responde:\n` +
+            `• *guardar* - Guardar con nombre automático\n` +
+            `• *guardar [nombre]* - Guardar con nombre personalizado\n` +
+            `• *no* - No guardar\n\n` +
+            `_Ej: guardar Inversiones MEF_`;
+          
+          await this.sendMessage(userId, senderNumber, formatQuestion);
           return;
         }
       }

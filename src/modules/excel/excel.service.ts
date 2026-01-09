@@ -625,6 +625,19 @@ export class ExcelService implements OnModuleInit {
   }
 
   /**
+   * Limpiar el upload pendiente para un usuario
+   */
+  clearPendingUploadForUser(userId: number): void {
+    for (const [excelId, pending] of this.pendingUploads) {
+      if (pending.userId === userId) {
+        this.pendingUploads.delete(excelId);
+        this.logger.log(`🧹 Limpiado pendingUpload para usuario ${userId}, Excel ${excelId}`);
+        return;
+      }
+    }
+  }
+
+  /**
    * Obtener cabeceras indexadas de un Excel
    */
   async getIndexedHeaders(excelId: number, userId: number): Promise<{ id: number; headerName: string; indexedAt: string }[]> {
