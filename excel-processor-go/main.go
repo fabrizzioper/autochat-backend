@@ -95,11 +95,42 @@
 		delete(cancelledProcesses, excelID)
 	}
 
-	// ============================================================================
-	// NOTIFICACIÓN HTTP (Simple y confiable)
-	// ============================================================================
+// ============================================================================
+// FORMATEO DE NÚMEROS (máximo 2 decimales)
+// ============================================================================
 
-	func notifyProgress(excelID, userID int, status *ProcessStatus) {
+// formatNumber formatea números con máximo 2 decimales
+// Convierte notación científica a formato normal
+func formatNumber(value string) string {
+	// Intentar parsear como float
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		// No es un número, devolver tal cual
+		return value
+	}
+	
+	// Si es un entero (sin decimales), devolver sin decimales
+	if f == float64(int64(f)) {
+		return strconv.FormatInt(int64(f), 10)
+	}
+	
+	// Formatear con máximo 2 decimales
+	formatted := strconv.FormatFloat(f, 'f', 2, 64)
+	
+	// Eliminar ceros trailing después del punto decimal
+	if strings.Contains(formatted, ".") {
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+	}
+	
+	return formatted
+}
+
+// ============================================================================
+// NOTIFICACIÓN HTTP (Simple y confiable)
+// ============================================================================
+
+func notifyProgress(excelID, userID int, status *ProcessStatus) {
 		// Actualizar estado local
 		updateActiveProcess(userID, status)
 
@@ -1159,7 +1190,8 @@
 										rowStrings[colIdx] = sharedStrings[idx]
 									}
 								} else {
-									rowStrings[colIdx] = cell.Value
+									// Formatear números con máximo 2 decimales
+									rowStrings[colIdx] = formatNumber(cell.Value)
 								}
 							}
 						}

@@ -550,8 +550,8 @@ export class WhatsAppService {
             createdAt: new Date(),
           });
           
-          // Limpiar el upload pendiente ya que capturamos las columnas
-          this.excelService.clearPendingUploadForUser(userId);
+          // NO limpiar pendingUpload aquí - lo necesita continueProcessingWithHeaders
+          // Se limpiará automáticamente cuando se procese el Excel
           
           // Preguntar si quiere guardar formato (el procesamiento ocurrirá después de la respuesta)
           const formatQuestion = 
