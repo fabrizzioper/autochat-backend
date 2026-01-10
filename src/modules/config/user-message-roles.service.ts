@@ -57,25 +57,22 @@ export class UserMessageRolesService {
   /**
    * Obtener el rol de un número de teléfono para un mensaje
    * Usado al responder mensajes por WhatsApp
+   * OPTIMIZADO: Una sola query con JOIN
    */
   async getRoleForPhoneAndTemplate(
     userId: number,
     phoneNumber: string,
     messageTemplateId: number,
   ): Promise<UserMessageRoleEntity | null> {
-    // Buscar el número autorizado
-    const authorizedNumber = await this.authorizedNumberRepo.findOne({
-      where: { userId, phoneNumber },
-    });
-
-    if (!authorizedNumber) {
-      return null;
-    }
-
-    return this.userRoleRepo.findOne({
-      where: { authorizedNumberId: authorizedNumber.id, messageTemplateId },
-      relations: ['messageRole'],
-    });
+    // Una sola query con JOIN para obtener el rol directamente
+    return this.userRoleRepo
+      .createQueryBuilder('umr')
+      .innerJoin('umr.authorizedNumber', 'an')
+      .innerJoinAndSelect('umr.messageRole', 'mr')
+      .where('an.userId = :userId', { userId })
+      .andWhere('an.phoneNumber = :phoneNumber', { phoneNumber })
+      .andWhere('umr.messageTemplateId = :messageTemplateId', { messageTemplateId })
+      .getOne();
   }
 
   /**

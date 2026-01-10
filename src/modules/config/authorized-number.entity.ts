@@ -11,6 +11,7 @@ export class AuthorizedNumberEntity {
   userId: number;
 
   @Column()
+  @Index()
   phoneNumber: string;
 
   @Column({ nullable: true })
