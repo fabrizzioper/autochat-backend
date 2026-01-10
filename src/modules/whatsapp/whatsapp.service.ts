@@ -14,6 +14,7 @@ import * as fs from 'fs/promises';
 import type { QRCodeData, SessionData, ConnectionInfo } from './types/whatsapp.types';
 import { WhatsAppGateway } from './whatsapp.gateway';
 import { ConfigService } from '../config/config.service';
+import { UserMessageRolesService } from '../config/user-message-roles.service';
 import { ExcelService } from '../excel/excel.service';
 import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
 import { MessageTemplatesService } from '../message-templates/message-templates.service';
@@ -49,6 +50,8 @@ export class WhatsAppService {
   constructor(
     @Inject(forwardRef(() => ConfigService))
     private readonly configService: ConfigService,
+    @Inject(forwardRef(() => UserMessageRolesService))
+    private readonly userMessageRolesService: UserMessageRolesService,
     @Inject(forwardRef(() => ExcelService))
     private readonly excelService: ExcelService,
     @Inject(forwardRef(() => WhatsAppGateway))
@@ -778,8 +781,23 @@ export class WhatsAppService {
       // Usar el primer registro encontrado
       const record = records[0];
       
+      // Verificar si el usuario tiene un rol asignado para este mensaje
+      const userRole = await this.userMessageRolesService.getRoleForPhoneAndTemplate(
+        userId,
+        senderNumber,
+        template.id,
+      );
+      
+      let templateToUse = template.template;
+      
+      // Si tiene rol asignado, usar solo la porción del mensaje que le corresponde
+      if (userRole && userRole.messageRole) {
+        templateToUse = userRole.messageRole.selectedText;
+        this.logger.log(`👤 Usuario ${senderNumber} tiene rol "${userRole.messageRole.roleName}" - usando porción del mensaje`);
+      }
+      
       // Procesar la plantilla reemplazando los placeholders
-      const responseMessage = this.messageTemplatesService.processTemplate(template.template, record.rowData);
+      const responseMessage = this.messageTemplatesService.processTemplate(templateToUse, record.rowData);
       
       const columnsText = searchColumns.length > 0 ? searchColumns.join('/') : 'columna';
       this.logger.log(`✅ Enviando respuesta para ${columnsText}="${searchValue}"`);
