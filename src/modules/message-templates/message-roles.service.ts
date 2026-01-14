@@ -1,24 +1,25 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { MessageRoleEntity } from './message-role.entity';
+import { MessageRoleEntity, TextSelection } from './message-role.entity';
 import { MessageTemplateEntity } from './message-template.entity';
 
 interface CreateRoleDto {
   messageTemplateId: number;
   roleName: string;
-  selectedText: string;
-  startIndex: number;
-  endIndex: number;
   color?: string;
 }
 
 interface UpdateRoleDto {
   roleName?: string;
-  selectedText?: string;
-  startIndex?: number;
-  endIndex?: number;
+  selections?: TextSelection[];
   color?: string;
+}
+
+interface AddSelectionDto {
+  text: string;
+  start: number;
+  end: number;
 }
 
 // Colores predefinidos para roles (se asignan automáticamente)
@@ -111,9 +112,7 @@ export class MessageRolesService {
     const role = this.roleRepo.create({
       messageTemplateId: dto.messageTemplateId,
       roleName: dto.roleName,
-      selectedText: dto.selectedText,
-      startIndex: dto.startIndex,
-      endIndex: dto.endIndex,
+      selections: [],
       color,
     });
 
@@ -130,11 +129,42 @@ export class MessageRolesService {
     const role = await this.findById(userId, roleId);
 
     if (dto.roleName !== undefined) role.roleName = dto.roleName;
-    if (dto.selectedText !== undefined) role.selectedText = dto.selectedText;
-    if (dto.startIndex !== undefined) role.startIndex = dto.startIndex;
-    if (dto.endIndex !== undefined) role.endIndex = dto.endIndex;
+    if (dto.selections !== undefined) role.selections = dto.selections;
     if (dto.color !== undefined) role.color = dto.color;
 
+    return this.roleRepo.save(role);
+  }
+
+  /**
+   * Agregar una selección a un rol
+   */
+  async addSelection(userId: number, roleId: number, selection: AddSelectionDto): Promise<MessageRoleEntity> {
+    const role = await this.findById(userId, roleId);
+    
+    // Asegurar que selections es un array
+    if (!role.selections) role.selections = [];
+    
+    // Agregar la nueva selección
+    role.selections.push({
+      text: selection.text,
+      start: selection.start,
+      end: selection.end,
+    });
+
+    return this.roleRepo.save(role);
+  }
+
+  /**
+   * Eliminar una selección de un rol por índice
+   */
+  async removeSelection(userId: number, roleId: number, selectionIndex: number): Promise<MessageRoleEntity> {
+    const role = await this.findById(userId, roleId);
+    
+    if (!role.selections || selectionIndex < 0 || selectionIndex >= role.selections.length) {
+      throw new NotFoundException('Selección no encontrada');
+    }
+    
+    role.selections.splice(selectionIndex, 1);
     return this.roleRepo.save(role);
   }
 
@@ -148,12 +178,11 @@ export class MessageRolesService {
   }
 
   /**
-   * Obtener el texto que corresponde a un rol específico
-   * Si el rol no existe, devuelve null (se usará el mensaje completo)
+   * Obtener el texto combinado de todas las selecciones de un rol
    */
   async getTextForRole(roleId: number): Promise<string | null> {
     const role = await this.roleRepo.findOne({ where: { id: roleId } });
-    return role?.selectedText || null;
+    if (!role || !role.selections || role.selections.length === 0) return null;
+    return role.selections.map(s => s.text).join('\n\n');
   }
 }
-

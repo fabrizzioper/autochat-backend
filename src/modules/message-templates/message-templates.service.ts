@@ -10,6 +10,7 @@ interface CreateTemplateDto {
   name: string;
   keywords: string[]; // Múltiples palabras clave
   searchColumns: string[]; // Múltiples columnas de búsqueda
+  numericColumns?: string[]; // Columnas que deben formatearse como números
   template: string;
 }
 
@@ -17,6 +18,7 @@ interface UpdateTemplateDto {
   name?: string;
   keywords?: string[];
   searchColumns?: string[];
+  numericColumns?: string[]; // Columnas que deben formatearse como números
   template?: string;
   isActive?: boolean;
   formatId?: number; // Nuevo: migrar a formato
@@ -133,6 +135,7 @@ export class MessageTemplatesService {
       name: dto.name,
       keywords: dto.keywords.map(k => k.toLowerCase().trim()).filter(k => k),
       searchColumns: dto.searchColumns.filter(c => c),
+      numericColumns: dto.numericColumns?.filter(c => c) || [],
       template: dto.template,
     });
 
@@ -150,6 +153,9 @@ export class MessageTemplatesService {
     }
     if (dto.searchColumns !== undefined) {
       template.searchColumns = dto.searchColumns.filter(c => c);
+    }
+    if (dto.numericColumns !== undefined) {
+      template.numericColumns = dto.numericColumns.filter(c => c);
     }
     if (dto.template !== undefined) template.template = dto.template;
     if (dto.isActive !== undefined) template.isActive = dto.isActive;
@@ -191,19 +197,53 @@ export class MessageTemplatesService {
     await this.repo.remove(template);
   }
 
+  /**
+   * Formatea un número con separadores de miles
+   * Ej: 2384723.34 → 2,384,723.34
+   */
+  private formatNumber(value: unknown): string {
+    if (value === null || value === undefined) return '-';
+    
+    // Convertir a string y limpiar
+    const strValue = String(value).trim();
+    
+    // Verificar si es un número válido
+    const numValue = parseFloat(strValue.replace(/,/g, ''));
+    if (isNaN(numValue)) {
+      // No es un número, devolver el valor original
+      return strValue;
+    }
+    
+    // Formatear con comas como separador de miles
+    return numValue.toLocaleString('en-US', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    });
+  }
+
   // Procesar una plantilla reemplazando los placeholders con datos reales
-  processTemplate(template: string, rowData: Record<string, unknown>): string {
+  processTemplate(template: string, rowData: Record<string, unknown>, numericColumns: string[] = []): string {
     let result = template;
     
     // Reemplazar todos los {{campo}} con los valores del rowData
     const placeholderRegex = /\{\{([^}]+)\}\}/g;
     
     result = result.replace(placeholderRegex, (match, fieldName) => {
-      const value = rowData[fieldName.trim()];
+      const trimmedFieldName = fieldName.trim();
+      const value = rowData[trimmedFieldName];
+      
       if (value === null || value === undefined) return '-';
+      
+      // Si la columna está marcada como numérica, formatear
+      if (numericColumns.includes(trimmedFieldName)) {
+        return this.formatNumber(value);
+      }
+      
+      // Si es número pero no está en numericColumns, usar formato básico
       if (typeof value === 'number') {
         return value.toLocaleString('es-PE');
       }
+      
       return String(value);
     });
 

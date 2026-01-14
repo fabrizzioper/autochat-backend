@@ -790,14 +790,16 @@ export class WhatsAppService {
       
       let templateToUse = template.template;
       
-      // Si tiene rol asignado, usar solo la porción del mensaje que le corresponde
-      if (userRole && userRole.messageRole) {
-        templateToUse = userRole.messageRole.selectedText;
-        this.logger.log(`👤 Usuario ${senderNumber} tiene rol "${userRole.messageRole.roleName}" - usando porción del mensaje`);
+      // Si tiene rol asignado, usar solo las porciones del mensaje que le corresponden
+      if (userRole && userRole.messageRole && userRole.messageRole.selections?.length > 0) {
+        // Combinar todas las selecciones del rol
+        templateToUse = userRole.messageRole.selections.map(s => s.text).join('\n\n');
+        this.logger.log(`👤 Usuario ${senderNumber} tiene rol "${userRole.messageRole.roleName}" - usando ${userRole.messageRole.selections.length} selección(es)`);
       }
       
       // Procesar la plantilla reemplazando los placeholders
-      const responseMessage = this.messageTemplatesService.processTemplate(templateToUse, record.rowData);
+      const numericColumns = template.numericColumns || [];
+      const responseMessage = this.messageTemplatesService.processTemplate(templateToUse, record.rowData, numericColumns);
       
       const columnsText = searchColumns.length > 0 ? searchColumns.join('/') : 'columna';
       this.logger.log(`✅ Enviando respuesta para ${columnsText}="${searchValue}"`);

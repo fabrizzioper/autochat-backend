@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { MessageRolesService } from './message-roles.service';
-import { MessageRoleEntity } from './message-role.entity';
+import { MessageRoleEntity, TextSelection } from './message-role.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from '../auth/decorators/get-user.decorator';
 import { UserEntity } from '../users/user.entity';
@@ -8,18 +8,19 @@ import { UserEntity } from '../users/user.entity';
 interface CreateRoleDto {
   messageTemplateId: number;
   roleName: string;
-  selectedText: string;
-  startIndex: number;
-  endIndex: number;
   color?: string;
 }
 
 interface UpdateRoleDto {
   roleName?: string;
-  selectedText?: string;
-  startIndex?: number;
-  endIndex?: number;
+  selections?: TextSelection[];
   color?: string;
+}
+
+interface AddSelectionDto {
+  text: string;
+  start: number;
+  end: number;
 }
 
 @Controller('message-roles')
@@ -73,6 +74,30 @@ export class MessageRolesController {
   }
 
   /**
+   * Agregar una selección a un rol
+   */
+  @Post(':roleId/selection')
+  async addSelection(
+    @GetUser() user: UserEntity,
+    @Param('roleId', ParseIntPipe) roleId: number,
+    @Body() dto: AddSelectionDto,
+  ): Promise<MessageRoleEntity> {
+    return this.service.addSelection(user.id, roleId, dto);
+  }
+
+  /**
+   * Eliminar una selección de un rol
+   */
+  @Delete(':roleId/selection/:index')
+  async removeSelection(
+    @GetUser() user: UserEntity,
+    @Param('roleId', ParseIntPipe) roleId: number,
+    @Param('index', ParseIntPipe) index: number,
+  ): Promise<MessageRoleEntity> {
+    return this.service.removeSelection(user.id, roleId, index);
+  }
+
+  /**
    * Eliminar un rol
    */
   @Delete(':roleId')
@@ -84,4 +109,3 @@ export class MessageRolesController {
     return { success: true, message: 'Rol eliminado correctamente' };
   }
 }
-

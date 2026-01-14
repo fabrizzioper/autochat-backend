@@ -38,6 +38,9 @@ export class MessageTemplateEntity {
   @Column({ type: 'json' })
   searchColumns: string[]; // Columnas donde buscar (ej: ["CODIGO", "SNIP", "NOMBRE_INVERSION"])
 
+  @Column({ type: 'json', default: '[]' })
+  numericColumns: string[]; // Columnas que deben formatearse como números (ej: 2384723.34 → 2,384,723.34)
+
   @Column({ type: 'text' })
   template: string; // Plantilla del mensaje con placeholders como {{Nombre}}, {{Email}}
 
