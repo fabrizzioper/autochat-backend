@@ -189,6 +189,13 @@ export class WhatsAppGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.logger.log(`⚠️ Progreso no encontrado para Excel ${excelId}, usuario ${userId}`);
   }
 
+  // Métodos para actualización de usuario
+  emitUserUpdatedToUser(userId: number, userData: { id: number; email: string; nombre: string; numero: string; isAdmin: boolean }) {
+    const userRoom = `user_${userId}`;
+    this.server.to(userRoom).emit('user-updated', userData);
+    this.logger.log(`👤 Datos de usuario actualizados emitidos a usuario ${userId} (isAdmin: ${userData.isAdmin})`);
+  }
+
   // Handler para recibir eventos de progreso desde el Python service vía WebSocket
   @SubscribeMessage('excel-progress-service')
   handleExcelProgressFromService(client: Socket, data: { excelId: number; userId: number; progress: number; total: number; processed: number; status: string; filename?: string; message?: string }) {

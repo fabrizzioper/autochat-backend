@@ -9,6 +9,7 @@ import { ConfigModule } from '../config/config.module';
 import { ExcelModule } from '../excel/excel.module';
 import { AuthModule } from '../auth/auth.module';
 import { MessageTemplatesModule } from '../message-templates/message-templates.module';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { MessageTemplatesModule } from '../message-templates/message-templates.m
     forwardRef(() => ExcelModule),
     forwardRef(() => AuthModule),
     forwardRef(() => MessageTemplatesModule),
+    forwardRef(() => AdminModule),
   ],
   controllers: [WhatsAppController],
   providers: [WhatsAppService, WhatsAppGateway, WhatsAppCredentialsService],

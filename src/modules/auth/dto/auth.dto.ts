@@ -17,6 +17,7 @@ export interface AuthResponse {
     email: string;
     nombre: string;
     numero: string;
+    isAdmin: boolean;
   };
 }
 

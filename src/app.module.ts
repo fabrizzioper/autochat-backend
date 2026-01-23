@@ -7,6 +7,7 @@ import { ExcelModule } from './modules/excel/excel.module';
 import { MessageTemplatesModule } from './modules/message-templates/message-templates.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { AuthModule } from './modules/auth/auth.module';
     ConfigModule,
     ExcelModule,
     MessageTemplatesModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],

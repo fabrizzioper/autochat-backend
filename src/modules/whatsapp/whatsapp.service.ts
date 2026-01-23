@@ -18,6 +18,7 @@ import { UserMessageRolesService } from '../config/user-message-roles.service';
 import { ExcelService } from '../excel/excel.service';
 import { WhatsAppCredentialsService } from './whatsapp-credentials.service';
 import { MessageTemplatesService } from '../message-templates/message-templates.service';
+import { AdminService } from '../admin/admin.service';
 
 interface UserSession {
   socket: WASocket | null;
@@ -60,6 +61,8 @@ export class WhatsAppService {
     private readonly credentialsService: WhatsAppCredentialsService,
     @Inject(forwardRef(() => MessageTemplatesService))
     private readonly messageTemplatesService: MessageTemplatesService,
+    @Inject(forwardRef(() => AdminService))
+    private readonly adminService: AdminService,
   ) {
     // Ya no cargamos sesiones al arrancar - se cargan cuando el usuario se conecta
   }
@@ -316,6 +319,23 @@ export class WhatsAppService {
 
       this.logger.log(`📊 Recibiendo Excel: ${filename} de ${senderNumber} para usuario ${userId}`);
 
+      // Registrar estadística de Excel recibido
+      try {
+        const authorizedNumber = await this.configService.getAuthorizedNumberByPhone(userId, senderNumber);
+        if (authorizedNumber) {
+          await this.adminService.logMessageStat(
+            userId,
+            authorizedNumber.id,
+            senderNumber,
+            'incoming',
+            'excel',
+            filename,
+          );
+        }
+      } catch (e) {
+        // Ignorar errores de estadísticas
+      }
+
       // Descargar archivo
       const buffer = await downloadMediaMessage(msg, 'buffer', {});
       const tempPath = path.join(process.cwd(), 'temp', `${Date.now()}-${filename}`);
@@ -435,6 +455,25 @@ export class WhatsAppService {
       this.logger.log(`📝 Mensaje de texto recibido de ${senderNumber}: ${text.substring(0, 50)}...`);
       
       if (!text) return;
+
+      // Registrar estadística de mensaje de texto recibido
+      try {
+        const authorizedNumber = await this.configService.getAuthorizedNumberByPhone(userId, senderNumber);
+        if (authorizedNumber) {
+          // Determinar si es una búsqueda
+          const isSearch = text.includes(':') || text.split(' ').length <= 3;
+          await this.adminService.logMessageStat(
+            userId,
+            authorizedNumber.id,
+            senderNumber,
+            'incoming',
+            isSearch ? 'search_request' : 'text',
+            text, // ✅ Guardamos el texto completo de la consulta también
+          );
+        }
+      } catch (e) {
+        // Ignorar errores de estadísticas
+      }
 
       // PASO 0: Verificar si hay un formato pendiente de guardar
       const pendingFormat = this.pendingFormatSaves.get(userId);
@@ -774,7 +813,7 @@ export class WhatsAppService {
 
       if (records.length === 0) {
         const columnsText = searchColumns.length > 0 ? searchColumns.join(' o ') : 'columna';
-        await this.sendMessage(userId, senderNumber, `❌ No se encontró ningún registro con ${columnsText} = "${searchValue}"`);
+        await this.sendMessage(userId, senderNumber, `❌ No se encontró ningún registro con ${columnsText} = "${searchValue}"`, 'search_response');
         return;
       }
 
@@ -803,14 +842,14 @@ export class WhatsAppService {
       
       const columnsText = searchColumns.length > 0 ? searchColumns.join('/') : 'columna';
       this.logger.log(`✅ Enviando respuesta para ${columnsText}="${searchValue}"`);
-      await this.sendMessage(userId, senderNumber, responseMessage);
+      await this.sendMessage(userId, senderNumber, responseMessage, 'search_response');
 
     } catch (error) {
       this.logger.error(`Error procesando mensaje de búsqueda: ${error.message}`);
     }
   }
 
-  private async sendMessage(userId: number, phoneNumber: string, message: string): Promise<void> {
+  private async sendMessage(userId: number, phoneNumber: string, message: string, messageType: 'text' | 'search_response' = 'text'): Promise<void> {
     const session = this.getUserSession(userId);
     
     if (!session.socket) {
@@ -822,6 +861,23 @@ export class WhatsAppService {
 
     const jid = `${phoneNumber}@s.whatsapp.net`;
     await session.socket.sendMessage(jid, { text: message });
+
+    // Registrar estadística de mensaje enviado
+    try {
+      const authorizedNumber = await this.configService.getAuthorizedNumberByPhone(userId, phoneNumber);
+      if (authorizedNumber) {
+        await this.adminService.logMessageStat(
+          userId,
+          authorizedNumber.id,
+          phoneNumber,
+          'outgoing',
+          messageType,
+          message, // ✅ Guardamos el contenido completo del mensaje enviado
+        );
+      }
+    } catch (e) {
+      // Ignorar errores de estadísticas para no afectar el envío
+    }
   }
 
   /**

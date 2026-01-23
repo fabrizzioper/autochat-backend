@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -7,6 +7,7 @@ import { AuthController } from './auth.controller';
 import { UserEntity } from '../users/user.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { env } from '../../config/env';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { env } from '../../config/env';
       secret: env.JWT_SECRET,
       signOptions: { expiresIn: '30d' }, // Token válido por 30 días
     }),
+    forwardRef(() => AdminModule),
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],
