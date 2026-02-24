@@ -94,9 +94,10 @@ export class WhatsAppCredentialsService {
     let creds = await this.getCredential<AuthenticationCreds>(userId, 'creds');
     
     if (!creds) {
-      // Si no hay credenciales, crear nuevas
+      // Si no hay credenciales, crear nuevas y guardarlas inmediatamente
       creds = initAuthCreds();
-      this.logger.log(`Nuevas credenciales creadas para usuario ${userId}`);
+      await this.saveCredential(userId, 'creds', creds);
+      this.logger.log(`Nuevas credenciales creadas y guardadas en BD para usuario ${userId}`);
     } else {
       this.logger.log(`Credenciales cargadas desde BD para usuario ${userId}`);
     }

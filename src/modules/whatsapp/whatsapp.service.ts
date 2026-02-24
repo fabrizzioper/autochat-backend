@@ -5,6 +5,7 @@ import makeWASocket, {
   WASocket,
   downloadMediaMessage,
   WAMessage,
+  fetchLatestBaileysVersion,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -26,6 +27,8 @@ interface UserSession {
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   phoneNumber: string | null;
   connectionInfo: ConnectionInfo | null;
+  lastError: string | null;
+  reconnectCount: number;
 }
 
 // Información de un Excel pendiente de guardar formato
@@ -75,6 +78,8 @@ export class WhatsAppService {
         connectionStatus: 'disconnected',
         phoneNumber: null,
         connectionInfo: null,
+        lastError: null,
+        reconnectCount: 0,
       });
     }
     return this.userSessions.get(userId)!;
@@ -127,13 +132,24 @@ export class WhatsAppService {
 
       session.connectionStatus = 'connecting';
 
+      // Obtener la versión más reciente de WA Web para evitar error 405
+      let version: [number, number, number] | undefined;
+      try {
+        const { version: latestVersion } = await fetchLatestBaileysVersion();
+        version = latestVersion;
+        this.logger.log(`Usando WA Web versión: ${latestVersion.join('.')}`);
+      } catch (e) {
+        this.logger.warn(`No se pudo obtener versión de WA Web, usando default: ${e.message}`);
+      }
+
       // Logger silencioso para evitar logs de base64
       const silentLogger = pino({ level: 'silent' });
-      
+
       session.socket = makeWASocket({
         auth: state,
         printQRInTerminal: false,
         logger: silentLogger,
+        ...(version ? { version } : {}),
       });
 
       // Manejar actualización de credenciales
@@ -155,30 +171,44 @@ export class WhatsAppService {
         }
 
         if (connection === 'close') {
-          const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-          this.logger.log(`Conexión cerrada para usuario ${userId}. Reconectando: ${shouldReconnect}`);
-          
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const errorMessage = (lastDisconnect?.error as Boom)?.message || 'unknown';
+          const errorStack = (lastDisconnect?.error as Error)?.stack || '';
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          session.lastError = `StatusCode: ${statusCode}, Error: ${errorMessage}`;
+          session.reconnectCount++;
+          this.logger.error(`Conexión cerrada para usuario ${userId}. StatusCode: ${statusCode}, Error: ${errorMessage}, Reconectando: ${shouldReconnect}, Intento #${session.reconnectCount}`);
+          this.logger.error(`Stack: ${errorStack}`);
+
           // Limpiar el socket actual
           session.socket = null;
           session.qrCodeString = null;
           session.phoneNumber = null;
           session.connectionInfo = null;
-          
-          if (shouldReconnect) {
+
+          const MAX_RECONNECTS = 5;
+
+          if (shouldReconnect && session.reconnectCount < MAX_RECONNECTS) {
             session.connectionStatus = 'disconnected';
-            
+
             // Emitir estado desconectado por WebSocket
             if (this.gateway) {
               this.gateway.emitConnectionStatusToUser(userId, 'disconnected');
             }
-            
-            // Esperar un poco antes de reintentar
+
+            // Backoff exponencial: 2s, 4s, 8s, 16s, 32s
+            const delay = Math.min(2000 * Math.pow(2, session.reconnectCount - 1), 32000);
+            this.logger.log(`Reintentando en ${delay}ms (intento ${session.reconnectCount}/${MAX_RECONNECTS})`);
             setTimeout(() => {
               this.initializeSession(userId);
-            }, 2000);
+            }, delay);
           } else {
             session.connectionStatus = 'disconnected';
-            
+            if (session.reconnectCount >= MAX_RECONNECTS) {
+              this.logger.error(`Máximo de reintentos alcanzado (${MAX_RECONNECTS}) para usuario ${userId}. Último error: ${errorMessage}`);
+              session.reconnectCount = 0;
+            }
+
             // Emitir estado desconectado por WebSocket
             if (this.gateway) {
               this.gateway.emitConnectionStatusToUser(userId, 'disconnected');
@@ -916,8 +946,8 @@ export class WhatsAppService {
 
     // Solo generar nuevo QR si realmente está desconectado y sin socket activo
     if (session.connectionStatus === 'disconnected' || session.connectionStatus === 'error') {
-      this.logger.log(`Generando nuevo QR para usuario ${userId} - No hay sesión activa`);
-      
+      this.logger.log(`Generando nuevo QR para usuario ${userId} - No hay sesión activa (lastError: ${session.lastError})`);
+
       // Limpiar socket anterior si existe
       if (session.socket) {
         try {
@@ -927,22 +957,23 @@ export class WhatsAppService {
         }
         session.socket = null;
       }
-      
+
       session.qrCodeString = null;
       session.connectionStatus = 'connecting';
-      
+      session.reconnectCount = 0;
+
       // Eliminar credenciales anteriores para forzar nuevo QR
       await this.credentialsService.deleteAllCredentials(userId);
       this.logger.log(`Credenciales anteriores eliminadas de BD para usuario ${userId}`);
-      
+
       // Inicializar nueva sesión
       await this.initializeSession(userId);
-      
-      // Esperar hasta que se genere el QR (máximo 10 segundos)
-      const maxWait = 10000;
+
+      // Esperar hasta que se genere el QR (máximo 15 segundos)
+      const maxWait = 15000;
       const startTime = Date.now();
-      
-      while (!session.qrCodeString && (Date.now() - startTime) < maxWait && session.connectionStatus === 'connecting') {
+
+      while (!session.qrCodeString && (Date.now() - startTime) < maxWait && (session.connectionStatus === 'connecting' || session.connectionStatus === 'disconnected')) {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
