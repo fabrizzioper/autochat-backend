@@ -1,0 +1,28 @@
+╔═══════════════════════════════════════════════════╗
+║     AutoChat Backend - Deployment Information     ║
+╚═══════════════════════════════════════════════════╝
+
+Fecha:           Sat Dec 20 18:53:39 -05 2025
+Proyecto GCP:    autochat-gcp-deploy
+Zona:            southamerica-east1-a
+VM:              autochat-backend-vm
+Tipo de máquina: e2-medium
+IP Externa:      34.39.238.207
+
+Backend URL:     http://34.39.238.207:3000
+JWT Secret:      xlxc3ztHDgok1WUC97Y3DSaZ4lT9fYIRFrlSg+j5+BdNe4jUlqB+ELEP2NjIArmfxvNmrryQA6K2Hdy199id4g==
+
+Base de datos:
+  Usuario:       root
+  Contraseña:    password
+  Database:      autochat_db
+
+Repositorio:     https://github.com/fabrizzioper/autochat-backend
+
+Comandos útiles:
+  Logs:     ./monitor-logs.sh
+  Estado:   ./check-status.sh
+  SSH:      gcloud compute ssh autochat-backend-vm --zone=southamerica-east1-a
+
+Cloudflare Tunnel URL: https://remarks-length-customers-carried.trycloudflare.com
+Tunnel configurado:    Sat Dec 20 19:02:31 -05 2025

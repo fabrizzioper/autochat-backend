@@ -1,0 +1,29 @@
+╔═══════════════════════════════════════════════════╗
+║     AutoChat Backend - Deployment Information     ║
+╚═══════════════════════════════════════════════════╝
+
+Fecha:           Wed Feb 25 22:17:11 -05 2026
+Proyecto GCP:    autochat-17443
+Zona:            us-east1-b
+VM:              autochat-backend-vm
+Tipo de máquina: c3d-highcpu-8
+IP Externa:      34.138.105.120
+
+Backend URL:     http://34.138.105.120:3000
+
+JWT Secret:      9wb+HPCTsZYGAqQDz443iIjBLLBIsnFr3IlidF3WtZcFcuAcy6Uu5/Gu3PgUgPQp+SqaSjsdyCQOFGQ0VK20+Q==
+
+Base de datos:
+  Usuario:       root
+  Contraseña:    password
+  Database:      autochat_db
+
+Repositorio:     https://github.com/fabrizzioper/autochat-backend
+
+Comandos útiles:
+  Logs:     ./monitor-logs.sh
+  Estado:   ./check-status.sh
+  SSH:      gcloud compute ssh autochat-backend-vm --zone=us-east1-b
+
+Cloudflare Tunnel URL: https://processors-throwing-newbie-coffee.trycloudflare.com
+Tunnel configurado:    Wed Feb 25 22:17:41 -05 2026
